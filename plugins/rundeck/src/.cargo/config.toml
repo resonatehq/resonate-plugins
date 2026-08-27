@@ -1,0 +1,8 @@
+# The tests run against the Rundeck the specification's §5 provisions: one
+# container, one project, and the jobs the tests provision in it. Executions
+# of the same job serialize behind the job's own concurrency setting, and a
+# test that watches an execution to its terminal state is measuring the
+# provider, not the plugin. The tests are therefore serial — the provider is
+# the shared fixture, not the test binary.
+[env]
+RUST_TEST_THREADS = "1"

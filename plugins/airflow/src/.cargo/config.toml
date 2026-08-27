@@ -1,0 +1,7 @@
+# The tests run against the Airflow the specification's §5 provisions, which
+# is `airflow standalone` on a SQLite metadata database: concurrent writers
+# lock it, the scheduler's heartbeat fails, and the instance stops running
+# Dags altogether. The tests are therefore serial — the provider is the
+# shared fixture, not the test binary.
+[env]
+RUST_TEST_THREADS = "1"

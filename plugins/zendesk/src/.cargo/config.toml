@@ -1,0 +1,7 @@
+# Zendesk is SaaS only — the specification has no §5 — so the tests stand one
+# local mock where the provider would be, and the plugin is pointed at it
+# through the environment before its first request. One mock, reset between
+# tests, is therefore the shared fixture the whole binary hands around: the
+# tests are serial.
+[env]
+RUST_TEST_THREADS = "1"

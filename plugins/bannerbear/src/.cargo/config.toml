@@ -1,0 +1,7 @@
+# Bannerbear is SaaS only — the specification has no §5 — so the tests run
+# against a local mock standing where the provider would be. That mock is one
+# server for the whole test binary, and the plugin is pointed at it once
+# through the environment, so the tests are serial: two tests mounting
+# expectations on the same mock at once would see each other's stubs.
+[env]
+RUST_TEST_THREADS = "1"

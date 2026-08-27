@@ -1,0 +1,22 @@
+[package]
+name = "resonate-plugin-rundeck"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+
+[dependencies]
+resonate-core = { git = "https://github.com/resonatehq/resonate", branch = "core-crate" }
+async-trait = "0.1"
+base64 = "0.22"
+fastrand = "2"
+humantime-serde = "1"
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
+
+[dev-dependencies]
+# The in-process Resonate server the end-to-end test compiles the worker into.
+resonate = { git = "https://github.com/resonatehq/resonate", branch = "core-crate" }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "macros", "sync"] }

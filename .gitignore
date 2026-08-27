@@ -1,0 +1,5 @@
+plugins/*/spec/Dockerfile
+plugins/*/src/target/
+__pycache__/
+target/
+Cargo.lock
