@@ -288,7 +288,7 @@
 | MQTT | [ ] | [ ] |
 | MSG91 | [ ] | [ ] |
 | MySQL | [ ] | [ ] |
-| n8n | [ ] | [ ] |
+| n8n | [x] | [x] |
 | NASA | [ ] | [ ] |
 | NetApp ONTAP | [ ] | [ ] |
 | Netlify | [ ] | [ ] |
