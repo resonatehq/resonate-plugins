@@ -206,7 +206,7 @@
 | Google Vertex AI | [ ] | [ ] |
 | Google Workflows | [ ] | [ ] |
 | Google Workspace Admin | [ ] | [ ] |
-| Gotify | [ ] | [ ] |
+| Gotify | [x] | [x] |
 | GoToWebinar | [ ] | [ ] |
 | Grafana | [ ] | [ ] |
 | GraphQL | [ ] | [ ] |
