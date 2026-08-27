@@ -72,7 +72,7 @@
 | Azure Synapse | [ ] | [ ] |
 | BambooHR | [ ] | [ ] |
 | Bannerbear | [x] | [x] |
-| Baserow | [ ] | [ ] |
+| Baserow | [x] | [x] |
 | Beeminder | [ ] | [ ] |
 | BigQuery Data Transfer Service | [ ] | [ ] |
 | Bitbucket | [ ] | [ ] |
