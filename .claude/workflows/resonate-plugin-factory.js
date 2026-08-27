@@ -5,10 +5,10 @@ export const meta = {
     { title: 'Pick', detail: 'shortlist unchecked plugins that clear the simplicity bar, take the most popular' },
     { title: 'Checkout', detail: 'fresh clone into a temp dir, branch named after the plugin' },
     { title: 'Specify', detail: 'plugin-specify skill', model: 'opus' },
-    { title: 'Review', detail: 'plugin-review skill', model: 'opus' },
-    { title: 'Fix', detail: 'apply review findings to the specification', model: 'opus' },
-    { title: 'Implement', detail: 'plugin-implement skill', model: 'opus' },
-    { title: 'Finalize', detail: 'tick Plugins.md, commit, push the branch' },
+    { title: 'Review', detail: 'plugin-review skill, re-run after each Fix', model: 'opus' },
+    { title: 'Fix', detail: 'apply review findings, then back to Review', model: 'opus' },
+    { title: 'Implement', detail: 'plugin-implement skill (skipped if review rejected)', model: 'opus' },
+    { title: 'Finalize', detail: 'tick Plugins.md per verdict and tests, commit, push the branch' },
   ],
 }
 
@@ -86,7 +86,11 @@ await agent(
 )
 
 // ── Review ──────────────────────────────────────────────────────────────
+// Review and Fix loop until the reviewer approves or the round budget runs out.
+// A specification that is still rejected at the end never reaches Implement.
 phase('Review')
+
+const MAX_REVIEW_ROUNDS = 3
 
 const REVIEW = {
   type: 'object',
@@ -98,19 +102,30 @@ const REVIEW = {
   required: ['verdict', 'has_findings', 'findings_report'],
 }
 
-const review = await agent(
-  `Read ${repo}/skills/plugin-review/SKILL.md and follow it exactly to review ${spec}. ` +
-  `Network access is available; Docker is available for the §5 environment where the ` +
-  `specification has one. Where executed evidence requires credentials that are not ` +
-  `available, record that and continue — do not sign up for accounts. ` +
-  `Do not commit or push. Fill the Reviewed by row per the skill.`,
-  { schema: REVIEW, model: 'opus', label: `review:${pick.scheme}` },
-)
+function reviewAgent(round) {
+  const rerun = round === 1
+    ? ''
+    : `This is review round ${round}: an earlier round's findings have since been applied to ` +
+      `the document. Review the specification as it stands now, from scratch — do not assume ` +
+      `an earlier finding was fixed correctly, and do not carry forward a finding the document ` +
+      `no longer merits. `
+  return agent(
+    `Read ${repo}/skills/plugin-review/SKILL.md and follow it exactly to review ${spec}. ` +
+    rerun +
+    `Network access is available; Docker is available for the §5 environment where the ` +
+    `specification has one. Where executed evidence requires credentials that are not ` +
+    `available, record that and continue — do not sign up for accounts. ` +
+    `Do not commit or push. Fill the Reviewed by row per the skill.`,
+    { schema: REVIEW, model: 'opus', phase: 'Review', label: `review:${pick.scheme}:r${round}` },
+  )
+}
 
-log(`review verdict: ${review.verdict}`)
+let review = await reviewAgent(1)
+let rounds = 1
+log(`review round 1 verdict: ${review.verdict}`)
 
 // ── Fix ─────────────────────────────────────────────────────────────────
-if (review.has_findings) {
+while (review.has_findings && rounds < MAX_REVIEW_ROUNDS) {
   phase('Fix')
   await agent(
     `The specification ${spec} was reviewed; the findings below are authoritative. ` +
@@ -119,14 +134,26 @@ if (review.has_findings) {
     `Where a finding proposes a rule change to a skill rather than a spec change, skip it and ` +
     `say so. Re-run python3 ${repo}/skills/plugin-specify/lint.py ${spec} until clean. ` +
     `Do not commit or push.\n\n--- FINDINGS ---\n${review.findings_report}`,
-    { model: 'opus', label: `fix:${pick.scheme}` },
+    { model: 'opus', phase: 'Fix', label: `fix:${pick.scheme}:r${rounds}` },
   )
-} else {
-  log('no findings — skipping Fix')
+
+  // The fixes are unreviewed until a fresh review sees them.
+  phase('Review')
+  rounds += 1
+  review = await reviewAgent(rounds)
+  log(`review round ${rounds} verdict: ${review.verdict}`)
 }
 
+if (review.has_findings && rounds >= MAX_REVIEW_ROUNDS) {
+  log(`round budget (${MAX_REVIEW_ROUNDS}) exhausted with findings still open`)
+}
+
+// A rejected specification is not a base to build on.
+const rejected = review.verdict === 'reject'
+if (rejected) log('specification REJECTED — skipping Implement, nothing will be ticked')
+
 // ── Implement ───────────────────────────────────────────────────────────
-phase('Implement')
+if (!rejected) phase('Implement')
 
 const IMPL = {
   type: 'object',
@@ -137,7 +164,7 @@ const IMPL = {
   required: ['tests_passed', 'report'],
 }
 
-const impl = await agent(
+const impl = rejected ? { tests_passed: false, report: 'Not implemented: the specification was rejected by review.' } : await agent(
   `Read ${repo}/skills/plugin-implement/SKILL.md and follow it exactly to implement the ` +
   `${pick.provider} plugin from ${spec} into ${repo}/plugins/${pick.scheme}/src. ` +
   `Docker is available for the §5 environment; network access is available for cargo. ` +
@@ -152,15 +179,25 @@ const impl = await agent(
 // ── Finalize ────────────────────────────────────────────────────────────
 phase('Finalize')
 
-const tick = impl.tests_passed
-  ? 'tick BOTH the Spec and Impl cells of that row to [x]'
-  : 'tick ONLY the Spec cell to [x]; leave Impl as [ ] (tests did not fully pass)'
+const tick = rejected
+  ? 'leave BOTH cells as [ ] (the specification was rejected by review) and commit the ' +
+    'work as it stands so it can be inspected by hand'
+  : impl.tests_passed
+    ? 'tick BOTH the Spec and Impl cells of that row to [x]'
+    : 'tick ONLY the Spec cell to [x]; leave Impl as [ ] (tests did not fully pass)'
+
+const subject = rejected
+  ? `${pick.scheme}: specification (plugin factory, REJECTED by review — not implemented)`
+  : `${pick.scheme}: specification + implementation (plugin factory)`
 
 await agent(
   `In ${repo} on branch ${pick.scheme} (verify with git branch --show-current): ` +
   `edit Plugins.md — find the row "| ${pick.provider} |" and ${tick}. ` +
-  `Then git add -A, commit with message "${pick.scheme}: specification + implementation ` +
-  `(plugin factory)" ending with the trailer "Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>", ` +
+  `Then git add -A. Cargo.lock is gitignored repo-wide but the plugin crates pin it ` +
+  `(see the tracked plugins/airflow/src/Cargo.lock), so also run ` +
+  `git add -f ${repo}/plugins/${pick.scheme}/src/Cargo.lock if that file exists. ` +
+  `Commit with the subject "${subject}" ending with the trailer ` +
+  `"Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>", ` +
   `and git push -u origin ${pick.scheme}. Confirm the push succeeded, then stop any ` +
   `plugin-${pick.scheme}-test container that is still running.`,
   { effort: 'low', label: `finalize:${pick.scheme}` },
@@ -171,7 +208,12 @@ return {
   scheme: pick.scheme,
   pick_rationale: { reason: pick.reason, simplicity: pick.simplicity, popularity: pick.popularity, runners_up: pick.runners_up },
   review_verdict: review.verdict,
+  review_rounds: rounds,
+  review_findings_open: review.has_findings,
+  implemented: !rejected,
   tests_passed: impl.tests_passed,
   implementation_report: impl.report,
-  note: `Branch ${pick.scheme} pushed to ${GH} from throwaway clone ${repo} (safe to delete). Review and merge by hand.`,
+  note: rejected
+    ? `Branch ${pick.scheme} pushed to ${GH} carrying a REJECTED specification and no implementation — nothing is ticked in Plugins.md. Read the review findings before doing anything with it. Throwaway clone ${repo} is safe to delete.`
+    : `Branch ${pick.scheme} pushed to ${GH} from throwaway clone ${repo} (safe to delete). Review and merge by hand.`,
 }
