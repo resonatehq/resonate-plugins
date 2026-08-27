@@ -1,8 +1,8 @@
 export const meta = {
   name: 'resonate-plugin-factory',
-  description: 'Pick the next simplest unimplemented plugin, then specify → review → apply findings → implement (Opus clean-room agents in a throwaway clone)',
+  description: 'Pick the most popular unimplemented plugin that clears the simplicity bar, then specify → review → apply findings → implement (Opus clean-room agents in a throwaway clone)',
   phases: [
-    { title: 'Pick', detail: 'choose the next simplest unchecked plugin from Plugins.md on origin/main' },
+    { title: 'Pick', detail: 'shortlist unchecked plugins that clear the simplicity bar, take the most popular' },
     { title: 'Checkout', detail: 'fresh clone into a temp dir, branch named after the plugin' },
     { title: 'Specify', detail: 'plugin-specify skill', model: 'opus' },
     { title: 'Review', detail: 'plugin-review skill', model: 'opus' },
@@ -23,9 +23,12 @@ const PICK = {
   properties: {
     provider: { type: 'string', description: 'Display name exactly as it appears in Plugins.md' },
     scheme: { type: 'string', description: 'Plugin scheme: lowercase, no separators (the plugins/<scheme>/ folder name)' },
-    reason: { type: 'string', description: 'One sentence: why this is the next simplest' },
+    reason: { type: 'string', description: 'One sentence: why this is the best simple-and-popular candidate' },
+    simplicity: { type: 'string', description: 'The evidence for the simplicity bar: auth model, operation surface, whether an OpenAPI document and a Docker image exist' },
+    popularity: { type: 'string', description: 'The evidence for popularity, with the numbers found: GitHub stars, package downloads, catalogue presence, or market position' },
+    runners_up: { type: 'string', description: 'The other shortlisted candidates and why each lost' },
   },
-  required: ['provider', 'scheme', 'reason'],
+  required: ['provider', 'scheme', 'reason', 'simplicity', 'popularity', 'runners_up'],
 }
 
 const pick = await agent(
@@ -33,15 +36,28 @@ const pick = await agent(
   `Plugin | Spec | Impl with [x]/[ ] cells) and list the existing plugin folders with ` +
   `\`gh api repos/${GH}/contents/plugins --jq '.[].name'\`. Also list open plugin branches ` +
   `with \`git ls-remote --heads ${ORIGIN}\` — a plugin with an open branch is taken. ` +
-  `Choose the NEXT SIMPLEST plugin that is unchecked in BOTH columns, has no folder, ` +
-  `and has no branch. "Simplest" means: a public, well-documented REST API (published ` +
-  `OpenAPI is a strong plus), single-token auth, a small operation surface (one obvious ` +
-  `unit of work plus a few reads), and ideally self-hostable in Docker so tests can run ` +
-  `live. Avoid providers requiring paid accounts, OAuth dances, or enterprise licenses.`,
+  `Consider only plugins unchecked in BOTH columns, with no folder and no branch. ` +
+  `Among those, choose the one at the INTERSECTION OF SIMPLE AND POPULAR, in two steps.\n\n` +
+  `Step 1 — simplicity is a BAR, not a ranking. A candidate clears it if it has: a public, ` +
+  `well-documented REST API (published OpenAPI is a strong plus), single-token auth, a small ` +
+  `operation surface (one obvious unit of work plus a few reads), and ideally a Docker image ` +
+  `so tests can run live. Providers requiring paid accounts, OAuth dances, or enterprise ` +
+  `licenses do not clear the bar. Shortlist EVERY remaining candidate that clears it — ` +
+  `expect several, and do not stop at the first one.\n\n` +
+  `Step 2 — rank the shortlist by POPULARITY and take the most popular. Popularity means how ` +
+  `widely the provider is actually used: GitHub stars and recent commit activity for ` +
+  `open-source providers, package-registry download counts for its official clients, presence ` +
+  `in integration catalogues (Zapier, n8n, Airbyte, Temporal), and general market position. ` +
+  `Look these numbers up rather than relying on memory, and cite the figures you find. Break ` +
+  `ties toward the provider a Resonate user is more likely to already run.\n\n` +
+  `A very popular provider that misses the simplicity bar is still out — the bar is not traded ` +
+  `away for popularity. Report the shortlist and why each runner-up lost.`,
   { schema: PICK, model: 'opus', label: 'pick' },
 )
 
 log(`picked ${pick.provider} (${pick.scheme}): ${pick.reason}`)
+log(`popularity: ${pick.popularity}`)
+log(`runners-up: ${pick.runners_up}`)
 
 const repo = `/tmp/resonate-plugin-factory/${pick.scheme}`
 const spec = `${repo}/plugins/${pick.scheme}/spec/specification.md`
@@ -153,6 +169,7 @@ await agent(
 return {
   provider: pick.provider,
   scheme: pick.scheme,
+  pick_rationale: { reason: pick.reason, simplicity: pick.simplicity, popularity: pick.popularity, runners_up: pick.runners_up },
   review_verdict: review.verdict,
   tests_passed: impl.tests_passed,
   implementation_report: impl.report,
