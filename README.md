@@ -1,9 +1,9 @@
 <h1 align="center">Resonate Plugins</h1>
 
 <p align="center">
-  <strong>Every API, as a promise.</strong><br>
-  Transport plugins that put an external system behind a durable promise —
-  callable from every Resonate SDK, whether the work takes forty milliseconds or four weeks.
+  <strong>Call any API like a local function.</strong><br>
+  Transport plugins that expose a provider's API as durable promises, so every
+  Resonate SDK can call it in any language — no client library, no HTTP in your code.
 </p>
 
 <p align="center">
@@ -14,25 +14,26 @@
 
 ---
 
-You create a promise; the Resonate server calls the provider, sees the
-call through to its terminal state, and settles the promise with the
-outcome — resolved for success, rejected with a code for every failure
-the provider documents as permanent. That is the whole interface. The
-provider becomes reachable from every Resonate SDK, in every language,
-without a client library in any of them.
+Integrating a provider usually means finding a client library for your
+language, or writing the HTTP by hand — and then doing it again for the
+next language, and deciding all over again which failures are worth
+retrying.
 
-For a call that answers immediately — run a query, open a ticket, push a
-notification — the win is reach: one integration, written once against
-the live API, available everywhere, with its failure modes already
-classified into settle, retry, and wait-for-an-operator.
+A plugin does it once. You create a promise; the Resonate server calls
+the provider and settles the promise with the outcome — resolved for
+success, rejected with a code for every failure the provider documents as
+permanent, retried on its own for everything transient. From your side
+that is a function call. It looks the same in Python, TypeScript, Go and
+Java, because the integration lives in the server rather than in any
+SDK.
 
-For work that takes real time, the promise earns its keep twice over. A
-Dag run takes an hour. A render takes four seconds. A support ticket
-closes twenty-eight days after someone opens it. Waiting on any of those
-normally costs you a worker, a webhook receiver, a retry loop, and a
-state machine to remember where you were when the process died. Here it
-costs a promise: nothing in your process has to stay alive for it, and
-nothing has to be restarted when it doesn't.
+Then, for anything long-running, you get await semantics for free. A Dag
+run takes an hour. A render takes four seconds. A support ticket closes
+twenty-eight days after someone opens it. Awaiting one of those normally
+costs a worker, a webhook receiver, a retry loop, and a state machine to
+remember where you were when the process died. Here it costs a promise:
+nothing in your process has to stay alive for it, and nothing has to be
+reconstructed when it doesn't.
 
 ## How it works
 
@@ -95,10 +96,11 @@ plugins/<scheme>/
 ```
 
 Each plugin exposes one address — `<scheme>://[{instance}]` — and a
-handful of operations named `resource.verb`. One of them is the work: the
-thing you durably wait on. The rest are the reads you need to build its
-arguments (`dag.list`, `template.get`) and to inspect the record
-afterwards.
+handful of operations named `resource.verb`: the provider actions a
+caller makes, plus the reads needed to build their arguments
+(`dag.list`, `template.get`) and to inspect the record afterwards. Some
+of those actions finish in one round trip; some run for hours. The
+caller's code does not change either way.
 
 Every operation is classified on two axes, and the classification is a
 promise about behaviour, not documentation:

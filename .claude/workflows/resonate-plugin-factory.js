@@ -49,16 +49,19 @@ const pick = await agent(
   `Simplicity is a BAR, not a ranking; only popularity ranks. Step 1 is neither — it is the ` +
   `homework the other two are judged on.\n\n` +
 
-  `Step 1 — NAME THE OPERATIONS. From the provider's live API documentation, name the ` +
-  `operations the plugin will actually expose: the provider action or actions a caller would ` +
-  `call, and the reads needed to build their arguments. Quote each endpoint's method and path. ` +
-  `Duration is not a qualification — a provider whose actions settle in one round trip is ` +
-  `worth a plugin, because the plugin is what makes its API callable as a promise from every ` +
-  `SDK. But where an action IS long-running, name the separate endpoint that observes it to a ` +
-  `terminal state and the states it can end in, because that is what the specification will ` +
-  `have to write. These are the operations the specification is expected to contain, so name ` +
-  `them as precisely as §4 will have to; a candidate you cannot describe at this resolution ` +
-  `has not been researched yet.\n\n` +
+  `Step 1 — NAME THE OPERATIONS. A plugin exposes a provider's API as durable promises so that ` +
+  `any Resonate SDK can call it as if it were a locally defined function. What makes a good ` +
+  `candidate is therefore an API worth reaching that way — not a slow one. A provider whose ` +
+  `every call answers in one round trip is a fine plugin; where an action does run long, the ` +
+  `promise gives it await semantics for free, which is a bonus on top and never the reason to ` +
+  `pick or to skip a provider.\n\n` +
+  `So: from the provider's live API documentation, name the operations the plugin will actually ` +
+  `expose — the provider action or actions a caller would make, and the reads needed to build ` +
+  `their arguments. Quote each endpoint's method and path. Where an action is long-running, also ` +
+  `name the separate endpoint that observes it to a terminal state and the states it can end in, ` +
+  `because that is what the specification will have to write. These are the operations the ` +
+  `specification is expected to contain, so name them as precisely as §4 will have to; a ` +
+  `candidate you cannot describe at this resolution has not been researched yet.\n\n` +
 
   `Step 2 — SIMPLICITY. A candidate clears it if it has: a public, well-documented REST API ` +
   `(published OpenAPI is a strong plus), single-token auth, a small operation surface (the ` +

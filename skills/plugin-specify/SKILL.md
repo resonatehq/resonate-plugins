@@ -13,10 +13,24 @@ API knowledge: APIs change.
 
 ## Concepts
 
-A plugin represents the provider's unit of work as a durable promise. The
-plugin function `op(cfg, promise)` runs in the Resonate server when the
-promise's Execute message is delivered. Its job is to complete the
-operation: begin it, poll to its terminal state, settle.
+A plugin exposes a provider's API as durable promises, so that any
+Resonate SDK can call it as if it were a locally defined function — no
+client library, no HTTP in the caller's code, no integration written once
+per language. That is what a plugin is for, and it is worth doing for an
+API whose every call answers in one round trip.
+
+Where an action is long-running, the promise carries await semantics on
+top for free: the caller awaits, the plugin sees the action through to
+its terminal state, and nothing in the caller's process has to stay alive
+meanwhile. That is the icing. It is not the qualification — a document
+that specifies three fast reads accurately is a good plugin, and hunting
+for something slow to justify one is how a plugin ends up specifying
+operations nobody asked for.
+
+The plugin function `op(cfg, promise)` runs in the Resonate server when
+the promise's Execute message is delivered. Its job is to complete the
+operation: begin it, poll it to a terminal state where it has one, and
+settle.
 
 - `promise.id` — the promise id (string).
 - `promise.timeout_at` — the caller's `timeoutAt`, milliseconds since
@@ -138,16 +152,16 @@ if r.status_code >= 400:
 1. Fetch the provider's API documentation. Find the OpenAPI spec if one is
    published; verify the URL resolves. Confirm the current API version.
 2. Choose the operations, in this order and nothing beyond it:
-   - **Work** — every provider action a caller would durably wait on.
-     Work is the provider's durable, named unit; an inline variant of the
-     same machinery (an ad-hoc command, a raw script run) is the same work
-     with its definition inlined — exclude it unless the provider has no
-     named unit. Duration is not a qualification: a provider whose actions
-     all settle in one round trip is still worth a plugin, because the
-     plugin is what makes the API callable as a promise from every SDK.
-     Where such a provider has no long-running unit, say so in the
-     Idempotency row and specify its actions as `request_response`; do not
-     hunt for something slow to justify the plugin.
+   - **Work** — every provider action a caller would make and want the
+     outcome of. Where the provider has a durable, named unit (a run, a
+     job, an export), that unit is the work; an inline variant of the same
+     machinery (an ad-hoc command, a raw script run) is the same work with
+     its definition inlined — exclude it unless the provider has no named
+     unit. Where the provider has no long-running unit, the work is simply
+     its actions, specified `request_response`: that is a plugin like any
+     other, since the value is exposing the API as a promise every SDK can
+     call. Never hunt for something slow to justify a plugin, and never
+     inflate a read into an action to have one.
    - **Composition** — the reads a caller needs to construct the work's
      args: enumerate the resource (`<resource>.list`) and fetch the one
      resource whose shape constrains the args (`<resource>.get`). Include
@@ -159,9 +173,11 @@ if r.status_code >= 400:
      itself work. A poll endpoint, a token exchange, or a webhook
      registration is internal mechanics, never an operation.
 
-   Expect 3–6 operations. Each inspection operation's Param description
-   states "A plain read — not the completion mechanism; `<work op>`
-   observes independently."
+   Expect 3–6 operations. Where a work operation polls, each inspection
+   operation's Param description states "A plain read — not the completion
+   mechanism; `<work op>` observes independently." Where no operation
+   polls there is no completion mechanism to disclaim, and the sentence is
+   omitted.
 
    Names are `resource.verb`, both segments lowercase with no separators
    (`dagrun`, not `dag_run`). Verbs: `create`, `get`, `list`, `update`,
