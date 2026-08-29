@@ -17,7 +17,12 @@ every step below; your final message is the findings report.
    header and §3 only — enough to know the provider, its API base, and
    where its documentation lives. **Do not read §4 yet.**
 2. Fetch the provider's live documentation and the OpenAPI spec from the
-   header's Notes table. Do not use memorized API knowledge.
+   header's Notes table. Do not use memorized API knowledge. If a URL the
+   Notes table cites does not resolve from here, the row must already say
+   so and name what was read instead; a bare citation of a source nobody
+   could fetch is a **minor** finding, because it presents a mirror's
+   claims as the provider's. Verify against the best source you can reach
+   and record which one it was — but never substitute recall for a source.
 3. From that documentation alone, write **§0 API Surface**: the API
    surface a caller wanting to drive this provider from an SDK wants.
    Name each call by its method and path, grouped by resource, and say in

@@ -150,7 +150,19 @@ if r.status_code >= 400:
 ## Procedure
 
 1. Fetch the provider's API documentation. Find the OpenAPI spec if one is
-   published; verify the URL resolves. Confirm the current API version.
+   published; verify the URL resolves — actually fetch it, and confirm what
+   came back is the document and not an error page or a login wall. Confirm
+   the current API version.
+
+   Where the canonical URL cannot be fetched from this environment, the
+   Notes row still names it — it is where the document lives — followed by
+   what was read instead and why, so that a later reader knows which claims
+   rest on a mirror rather than on the provider. A bare authoritative URL
+   in the Notes table asserts that the document behind it was read. Never
+   write a source you did not fetch, and never fall back to memorized API
+   knowledge when the source is unreachable: a mirror, the provider's
+   shipped source, or an official client library is evidence; recall is
+   not.
 2. Choose the operations. The plugin is how a caller reaches this API from
    any SDK, so the surface to expose is the one a caller would actually
    use — the provider's primary resource and what is done to it — not the
@@ -348,7 +360,10 @@ documents the provider's constraints on the injected identity value
 (charset, length, uniqueness scope). For a self-hosted provider the API
 row is `{base_url}/<path>` and `base_url: String` is a required §2 key.
 Notes table: the OpenAPI URL, and the Self-hosted row (`yes — §5` or
-`no — SaaS only, no §5`). No other rows. The API row is the origin+prefix
+`no — SaaS only, no §5`). No other rows. Where the OpenAPI URL could not
+be fetched from this environment, the row names it and then says so, with
+the source actually read — `<url> — unreachable from here (403); read from
+<mirror or client library>`. The API row is the origin+prefix
 the implementation composes; request lines and the Probe are written as
 the full path from the host root, including any version segment already
 present in the API row — `POST /api/v2/tickets`, not `POST /tickets`.
