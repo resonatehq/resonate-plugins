@@ -38,7 +38,39 @@ const PICK = {
   required: ['provider', 'scheme', 'reason', 'operations', 'simplicity', 'popularity', 'runners_up'],
 }
 
-const pick = await agent(
+// A re-specification: args names a plugin that already exists, and this run
+// replaces its specification and crate rather than choosing a new provider.
+// Pick still runs, reduced to its research half — Specify needs the operations
+// input either way, and naming them fresh is the point of the exercise.
+const redo = args && args.provider && args.scheme ? args : null
+
+const pick = redo
+  ? await agent(
+      `The ${redo.provider} plugin already exists in ${GH} and is being re-specified from ` +
+      `scratch. You are not choosing a provider — that is settled. Your job is the research ` +
+      `Specify needs.\n\n` +
+      (redo.note ? `Why it is being redone: ${redo.note}\n\n` : '') +
+      `A plugin exposes a provider's API as durable promises so that any Resonate SDK can call ` +
+      `it as if it were a locally defined function. The surface to expose is therefore the one a ` +
+      `caller would actually use: the provider's primary resource and what is done to it. ` +
+      `Duration is irrelevant to whether an operation belongs — a call that answers in one round ` +
+      `trip is as much a part of the API as one that runs for an hour.\n\n` +
+      `From ${redo.provider}'s live API documentation, name the operations the plugin should ` +
+      `expose, each with its method and quoted path: the actions a caller would make on the ` +
+      `primary resource, any durable named unit the provider offers, and the reads needed to ` +
+      `find ids, constrain arguments, and inspect records. Leave out instance administration and ` +
+      `transport mechanics. Where an action is long-running, also name the separate endpoint ` +
+      `that observes it to a terminal state and the states it can end in.\n\n` +
+      `The plugin currently exposes: ${redo.current || 'unknown'}. Treat that as the thing being ` +
+      `reconsidered, not as a starting point — go to the documentation and say what the surface ` +
+      `should be, then say plainly what you would add or drop and why.\n\n` +
+      `Report provider exactly as "${redo.provider}" and scheme exactly as "${redo.scheme}" — ` +
+      `they are settled. Fill simplicity and popularity from what you find; runners_up is ` +
+      `"n/a — re-specification". Claim nothing: this plugin is already yours.`,
+      { schema: PICK, model: 'opus', label: `research:${redo.scheme}` },
+    )
+  : await agent(
+
   `Fetch https://raw.githubusercontent.com/${GH}/main/Plugins.md (a table: ` +
   `Plugin | Spec | Impl with [x]/[ ] cells). List the open plugin branches with ` +
   `\`git ls-remote --heads ${ORIGIN}\` — a plugin with an open branch is taken — and the ` +
@@ -104,7 +136,12 @@ phase('Checkout')
 await agent(
   `Run: rm -rf ${repo} && git clone ${ORIGIN} ${repo} && ` +
   `git -C ${repo} checkout -b ${pick.scheme}. ` +
-  `Confirm with git -C ${repo} branch --show-current.`,
+  `Confirm with git -C ${repo} branch --show-current.` +
+  (redo
+    ? ` Then delete the plugin's existing spec and crate so the next step starts clean: ` +
+      `rm -rf ${repo}/plugins/${pick.scheme}/spec ${repo}/plugins/${pick.scheme}/src. ` +
+      `Leave plugins/${pick.scheme}/README.md and the Plugins.md row alone.`
+    : ''),
   { effort: 'low', label: `checkout:${pick.scheme}` },
 )
 
@@ -116,6 +153,11 @@ await agent(
   `specification for ${pick.provider}. Write the document to ${spec} (create the directories; ` +
   `also create ${repo}/plugins/${pick.scheme}/README.md containing only "# ${pick.provider}"). ` +
   `Docker is available for §5 where the provider is self-hostable. Do not commit or push.\n\n` +
+  (redo
+    ? `This is a re-specification: the ${pick.provider} plugin already exists and its previous ` +
+      `spec/ and src/ have been deleted. Write the document from the live documentation as if ` +
+      `for the first time — do not go looking for the old one in git history.\n\n`
+    : '') +
   `The candidate was selected on the strength of these operations, which §4 is expected to ` +
   `contain:\n${pick.operations}\n\n` +
   `Follow the skill, not this list, if the live documentation disagrees with it — but say ` +
@@ -315,11 +357,12 @@ await agent(
   `   the Reviewed by row asserts a review nobody can read.\n` +
   `2. Bring the branch up to date: git fetch origin main && git merge origin/main. Resolve ` +
   `   conflicts if any — Plugins.md is edited by every run, so expect one there.\n` +
-  `3. Edit Plugins.md — find the row for "${pick.provider}" and ${tick}.\n` +
+  `3. Edit Plugins.md — find the row for "${pick.provider}" and ${tick}` +
+  (redo ? ' (the row is already ticked; leave it ticked, or untick Impl if verification failed)' : '') + `.\n` +
   `4. git add -A. Then run \`git status --porcelain\` and confirm every staged path is a file ` +
   `   this plugin owns: plugins/${pick.scheme}/** and Plugins.md, nothing else. Nothing ` +
   `   .gitignore matches may be committed — never force-add. Unstage anything else.\n` +
-  `5. Commit with message "${pick.scheme}: specification + implementation (plugin factory)" ` +
+  `5. Commit with message "${pick.scheme}: ${redo ? 're-specification + implementation' : 'specification + implementation'} (plugin factory)" ` +
   `   ending with the trailer "Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>", and ` +
   `   \`git push -u origin ${pick.scheme}\`. Confirm the push succeeded.\n` +
   `6. Clean up this run: remove the plugin-${pick.scheme}-test container AND its image, then ` +

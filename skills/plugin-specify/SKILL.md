@@ -151,33 +151,41 @@ if r.status_code >= 400:
 
 1. Fetch the provider's API documentation. Find the OpenAPI spec if one is
    published; verify the URL resolves. Confirm the current API version.
-2. Choose the operations, in this order and nothing beyond it:
-   - **Work** — every provider action a caller would make and want the
-     outcome of. Where the provider has a durable, named unit (a run, a
-     job, an export), that unit is the work; an inline variant of the same
-     machinery (an ad-hoc command, a raw script run) is the same work with
-     its definition inlined — exclude it unless the provider has no named
-     unit. Where the provider has no long-running unit, the work is simply
-     its actions, specified `request_response`: that is a plugin like any
-     other, since the value is exposing the API as a promise every SDK can
-     call. Never hunt for something slow to justify a plugin, and never
-     inflate a read into an action to have one.
-   - **Composition** — the reads a caller needs to construct the work's
-     args: enumerate the resource (`<resource>.list`) and fetch the one
-     resource whose shape constrains the args (`<resource>.get`). Include
-     only where the work's args actually reference provider-defined names
-     or ids.
-   - **Inspection** — the plain read of the work's own record, and, where
-     the work publishes results separately, the read that retrieves them.
-   - Nothing else. No update, delete, or admin operation unless it is
-     itself work. A poll endpoint, a token exchange, or a webhook
-     registration is internal mechanics, never an operation.
+2. Choose the operations. The plugin is how a caller reaches this API from
+   any SDK, so the surface to expose is the one a caller would actually
+   use — the provider's primary resource and what is done to it — not the
+   smallest set that happens to surround a single job.
 
-   Expect 3–6 operations. Where a work operation polls, each inspection
-   operation's Param description states "A plain read — not the completion
-   mechanism; `<work op>` observes independently." Where no operation
-   polls there is no completion mechanism to disclaim, and the sentence is
-   omitted.
+   - **Actions** — the calls that do something a caller would make and
+     want the outcome of: the writes on the primary resource, and any
+     durable, named unit the provider offers (a run, a job, an export).
+     Where such a unit exists it is the centre of the plugin; an inline
+     variant of the same machinery (an ad-hoc command, a raw script run)
+     is the same action with its definition inlined — exclude it unless
+     the provider has no named unit. Where the provider has no
+     long-running unit, its ordinary writes are the actions, specified
+     `request_response`. Never hunt for something slow to justify a
+     plugin, and never inflate a read into an action to have one.
+   - **Reads** — enumerating and fetching what the actions name or
+     produce: the list a caller pages to find an id, the get whose shape
+     constrains an action's args, the read of an action's own record, and
+     where results are published separately, the read that retrieves them.
+   - **Bounds** — leave out what a caller would not reach for through a
+     durable promise. Instance administration is out: users, permissions,
+     licences, settings, and schema or definition management the provider
+     expects to happen out of band. Transport mechanics are out: a poll
+     endpoint, a token exchange, a webhook registration. But an update or
+     a delete on the primary resource is an ordinary action needing no
+     special argument — only an update or delete on the provider's own
+     configuration is administration.
+
+   Expect 3–8 operations, and use the upper end where the primary resource
+   has a full lifecycle: a plugin that can create a record but not read,
+   update or delete one is not an integration a caller can build on.
+   Where an action polls, the Param description of each read that could be
+   mistaken for its completion mechanism states "A plain read — not the
+   completion mechanism; `<action op>` observes independently." Where no
+   action polls there is nothing to disclaim and the sentence is omitted.
 
    Names are `resource.verb`, both segments lowercase with no separators
    (`dagrun`, not `dag_run`). Verbs: `create`, `get`, `list`, `update`,
