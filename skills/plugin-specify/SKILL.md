@@ -191,9 +191,16 @@ if r.status_code >= 400:
      special argument — only an update or delete on the provider's own
      configuration is administration.
 
-   Expect 3–8 operations, and use the upper end where the primary resource
-   has a full lifecycle: a plugin that can create a record but not read,
-   update or delete one is not an integration a caller can build on.
+   Size the set by the resource, not by a number. A provider with one
+   durable unit and the reads that feed it lands around four operations; a
+   provider whose primary resource has a full lifecycle needs that
+   lifecycle, and its batch variants are part of the same lifecycle rather
+   than additions to argue for. A plugin that can create a record but not
+   read, update or delete one is not an integration a caller can build on.
+   What keeps the set honest is not a ceiling but the question behind every
+   entry: would a caller driving this provider from an SDK reach for it? An
+   operation that fails that question is surface to maintain and to get
+   wrong, however cheap it looks to specify.
    Where an action polls, the Param description of each read that could be
    mistaken for its completion mechanism states "A plain read — not the
    completion mechanism; `<action op>` observes independently." Where no

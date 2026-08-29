@@ -248,8 +248,9 @@ for (round = 1; round <= ROUNDS; round++) {
     log('no findings — nothing to fix')
     break
   }
-  if (review.verdict === 'approve') break
-  if (round === ROUNDS) break
+  // Findings are applied whatever the verdict. `approve` means nothing
+  // blocking was found, not that the minor and nit findings evaporate.
+  if (review.verdict === 'reject' && round === ROUNDS) break
 
   phase('Fix')
   await agent(
@@ -266,6 +267,29 @@ for (round = 1; round <= ROUNDS; round++) {
     `--- FINDINGS (round ${round}) ---\n${review.findings_report}`,
     { model: 'opus', label: `fix:${pick.scheme}:${round}` },
   )
+
+  // A reject loops for another full review. Anything else is done being
+  // reviewed — but Fix has just rewritten the document the reviewer signed,
+  // so re-attest before shipping rather than leaving Reviewed by pointing
+  // at a version that no longer exists.
+  if (review.verdict !== 'reject') {
+    phase('Review')
+    review = await agent(
+      `The findings below were applied to ${spec} after it was reviewed. Check only that: ` +
+      `that each finding was applied, applied correctly, and broke nothing adjacent. Do not ` +
+      `redo the coverage analysis or re-execute §5 — the previous round did that and its ` +
+      `verdict stands unless your check overturns it.\n\n` +
+      `Re-run \`${lint} ${spec}\` and overwrite the Reviewed by row with your model name and ` +
+      `today's date, so the attestation names the document as it now stands.\n\n` +
+      `Return the previous report VERBATIM, then append a "## Re-attestation" section saying, ` +
+      `per finding, whether it was applied and whether you agree with how. Your verdict is the ` +
+      `previous one unless a fix was wrong or introduced a defect — then reject and say which.` +
+      `\n\n--- PREVIOUS REPORT (verdict: ${review.verdict}) ---\n${review.findings_report}`,
+      { schema: REVIEW, model: 'opus', label: `reattest:${pick.scheme}:${round}` },
+    )
+    log(`re-attestation verdict: ${review.verdict}`)
+    break
+  }
 }
 
 if (review.verdict === 'reject') {
