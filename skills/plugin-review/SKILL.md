@@ -44,7 +44,16 @@ every step below; your final message is the findings report.
    | delete | `DELETE /api/v2/tickets/{id}` | |
 
    Write `—` where the provider has no such endpoint; that is an answer,
-   not a gap. Fill the last column when you read §4. Batch and scoped
+   not a gap. Fill the last column when you read §4.
+
+   Where the provider splits an action into a submit and a poll, the
+   lifecycle row is the action, and §4 should answer it with one operation
+   that submits and waits — the split is HTTP's limitation, not the
+   caller's contract, and collapsing it is what the plugin is for. §4
+   reproducing the split as two operations, so that a caller must submit
+   and then poll for themselves, is a **significant** finding. A
+   `<resource>.submit` alongside the waiting operation is the sanctioned
+   fire-and-forget variant and is not that; `submit` on its own is. Batch and scoped
    variants belong to the verb they implement, not to rows of their own.
    Supporting a resource means supporting its lifecycle: half an API is a
    plugin a caller has to abandon the moment they need the other half.

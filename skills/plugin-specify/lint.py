@@ -171,6 +171,15 @@ def main(path, pre_review=False):
                  f"add {res}.get/{res}.list, or say in the Param description why the "
                  f"provider offers no read")
 
+    # L-21: a fire-and-forget variant without the waiting operation it is a
+    # variant of. The waiting form is the default — reproducing only the
+    # provider's submit-and-poll split is the provider's shape, not ours.
+    for res, verbs in sorted(by_resource.items()):
+        if "submit" in verbs and not verbs - {"submit", "get", "list"}:
+            err(f"L-21: '{res}.submit' has no waiting counterpart — `submit` is the "
+                f"non-waiting variant of an action, so {res} needs the action itself "
+                f"(e.g. {res}.create, which polls to a terminal state)")
+
     # L-18: a boolean the caller supplies must reach the wire as
     # "true"/"false". Python renders True/False, which providers reject.
     bool_props = set()

@@ -178,6 +178,41 @@ if r.status_code >= 400:
      long-running unit, its ordinary writes are the actions, specified
      `request_response`. Never hunt for something slow to justify a
      plugin, and never inflate a read into an action to have one.
+   - **Collapse the provider's async split.** Many providers cut one piece
+     of work in two: `POST /images` answers at once with a pending record,
+     and the caller polls `GET /images/{uid}` until it is done. That split
+     is a workaround for HTTP, which cannot hold a request open for
+     minutes. A durable promise can. So the plugin does not reproduce it —
+     `image.create` submits *and* polls to a terminal state and resolves
+     with the finished image. One call, one await, the result in hand; the
+     caller never learns the provider made them ask twice. This is the
+     default and it is the point of the plugin, so specify the waiting
+     operation first and always.
+
+     The poll endpoint is not an operation of its own — it is the
+     mechanics of `image.create`. The record read stays legitimate as a
+     plain read (`image.get`) and carries the disclaimer that says so.
+
+     Offer the non-waiting variant only where a caller would want it, and
+     name it `<resource>.submit`: a reserved verb meaning exactly this
+     everywhere — hand the work to the provider and resolve as soon as it
+     is accepted, carrying the handle the caller needs to come back to it.
+     Its Resolved schema is the handle, not the result, and its Param
+     description says in as many words that resolution means accepted, not
+     finished. The pair shares everything but the wait: the same
+     Integration Request, the same Param schema, the same Invocation rung
+     and injected identity, differing only in Monitoring (`request_poll`
+     against `request_response`) and in what Resolved carries.
+
+     `submit` earns its place when the wait is long enough that a caller
+     might genuinely not want to hold a promise open for it, and when the
+     provider's handle stays good long enough to be redeemed later. Where
+     the handle expires, or the status is readable only for a moment,
+     `submit` hands back something that cannot be cashed in and should not
+     exist. Where the provider already answers with the finished result in
+     one call there is nothing to collapse and nothing to offer: one
+     operation, `request_response`. Never specify `submit` without its
+     waiting counterpart — that is the provider's shape, not ours.
    - **Reads** — enumerating and fetching what the actions name or
      produce: the list a caller pages to find an id, the get whose shape
      constrains an action's args, the read of an action's own record, and
