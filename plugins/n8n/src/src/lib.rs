@@ -8,10 +8,6 @@
 // `plugin` is public so `tests/process.rs` can exercise `plugin::process`
 // directly — the plugin's only test surface.
 pub mod plugin;
-// n8n stamps no client-supplied identity on a retry (§ Idempotency), so
-// this is the one plugin whose `process` never calls the frame's
-// `sanitize`. The frame is never edited, so the lint is silenced here.
-#[allow(dead_code)]
 mod worker;
 
 pub use plugin::Config;

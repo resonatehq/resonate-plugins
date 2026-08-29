@@ -3,41 +3,45 @@
 //! The only test that exercises the frame — claim, heartbeat, settle —
 //! together with `plugin::process`. Everything upstream of the worker (the
 //! HTTP edge, the poll transport, auth) is the server's own test surface,
-//! not this crate's, so none of it is compiled in: an in-memory store, the
-//! two background loops, a router holding one worker under one scheme.
+//! not this crate's, so none of it is compiled in: an in-memory store, one
+//! background loop, and a router holding one worker under one scheme.
 //!
 //! Bring the provider up with specification §5.1/§5.2 first — the same
-//! environment `tests/process.rs` uses.
+//! environment `tests/process.rs` uses. The two work items are §5's own:
+//! `N8N_FIXTURE_OK`, whose retry succeeds, and `N8N_FIXTURE_FAIL`, whose
+//! retry fails again.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use base64::Engine;
 use serde_json::{json, Value};
 
 use resonate::config::Config as ServerConfig;
-use resonate_server_dbms::persistence_sqlite::SqliteStorage;
-use resonate_server_dbms::Storage;
-use resonate::processing::{processing_messages, processing_timeouts};
+use resonate::deadlines;
+use resonate::processing::processing_timeouts;
 use resonate::server::Server;
 use resonate::transport::TransportDispatcher;
-use resonate_core::types::{RequestEnvelope, RequestHead, PROTOCOL_VERSION};
-use resonate_core::{ResonateRouter, ResonateServer, ResonateWorker};
+use resonate_core::types::{Message, RequestEnvelope, RequestHead, PROTOCOL_VERSION};
+use resonate_core::{ResonateRouter, ResonateServer, ResonateWorker, Unavailable};
+use resonate_server_dbms::engine_port::ResonateEngine;
+use resonate_server_dbms::engine_sqlite::SqliteEngine;
 use resonate_plugin_n8n::{plugin::Config, Worker, SCHEME};
 
-/// The succeeding work item: `N8N_FIXTURE_OK`, whose retry succeeds now that
-/// §5.2 has activated the gate. The promise reaches `resolved`, carrying the
-/// §4.1.2 Resolved value.
+/// The succeeding work item: the promise reaches `resolved`, carrying the
+/// §4.12.2 Resolved value.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_promise_targeting_this_plugin_resolves_from_a_successful_retry() {
-    let (server, _shutdown) = harness();
+    let (server, _shutdown) = harness().await;
     let id = promise_id("e2e-ok");
+    let source = env("N8N_FIXTURE_OK");
 
     create(
         &server,
         &id,
-        json!({"func": "execution.retry", "args": {"id": env("N8N_FIXTURE_OK")}}),
+        json!({"func": "execution.retry", "args": {"id": source}}),
     )
     .await;
     let (state, value) = settled(&server, &id).await;
@@ -45,22 +49,21 @@ async fn a_promise_targeting_this_plugin_resolves_from_a_successful_retry() {
     assert_eq!(state, "resolved", "{value}");
     assert_eq!(value["status"], "success");
     assert_eq!(value["mode"], "retry");
-    assert_eq!(value["retryOf"].to_string(), env("N8N_FIXTURE_OK"));
-    assert!(value["id"].is_string(), "{value}");
+    assert_eq!(value["retryOf"].to_string().trim_matches('"'), source);
 }
 
-/// The failing work item: `N8N_FIXTURE_FAIL`, whose workflow throws
-/// unconditionally. The promise reaches `rejected`, carrying the §4.1.2
-/// Rejected value with `code: execution_failed`.
+/// The failing work item: the promise reaches `rejected`, carrying the
+/// §4.12.2 Rejected value with `code: execution_failed`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_promise_targeting_this_plugin_rejects_from_a_failed_retry() {
-    let (server, _shutdown) = harness();
+    let (server, _shutdown) = harness().await;
     let id = promise_id("e2e-fail");
+    let source = env("N8N_FIXTURE_FAIL");
 
     create(
         &server,
         &id,
-        json!({"func": "execution.retry", "args": {"id": env("N8N_FIXTURE_FAIL")}}),
+        json!({"func": "execution.retry", "args": {"id": source}}),
     )
     .await;
     let (state, value) = settled(&server, &id).await;
@@ -73,42 +76,82 @@ async fn a_promise_targeting_this_plugin_rejects_from_a_failed_retry() {
 // ─── The server ───────────────────────────────────────────────────────────────
 
 /// A whole Resonate server, in this process, with one worker on it. The
-/// returned sender owns the background loops: dropping it stops them, so a
-/// test holds it for as long as it holds the server.
-fn harness() -> (Arc<Server>, tokio::sync::watch::Sender<bool>) {
+/// returned sender owns the background loop: dropping it stops it, so a test
+/// holds it for as long as it holds the server.
+async fn harness() -> (Arc<Server>, tokio::sync::watch::Sender<bool>) {
     let mut config = ServerConfig::default();
     // Nothing else is enabled: this plugin is the only way out of the server.
     config.transports.http_push.enabled = false;
     config.transports.http_poll.enabled = false;
+    config.transports.gcps.enabled = false;
+    config.transports.bash_exec.enabled = false;
     let lease_timeout = config.tasks.lease_timeout;
-    let retry_timeout = config.tasks.retry_timeout;
 
-    let storage = Storage::Sqlite(
-        SqliteStorage::open(":memory:", retry_timeout).expect("in-memory store"),
+    let engine: Arc<dyn ResonateEngine> = Arc::new(
+        SqliteEngine::open(
+            ":memory:",
+            config.tasks.retry_timeout,
+            config.storage.sqlite.preload_limit,
+            config.storage.sqlite.migrate,
+            config.debug,
+        )
+        .expect("in-memory store"),
     );
-    let state = Arc::new(Server::new(config, None, storage));
 
-    // The worker holds the server port directly — the same `process` path a
-    // remote worker's HTTP calls take.
-    let port: Arc<dyn ResonateServer> = state.clone();
-    let mut workers: HashMap<String, Arc<dyn ResonateWorker>> = HashMap::new();
-    workers.insert(
-        SCHEME.to_string(),
-        Arc::new(Worker::new(port, plugin_config(), lease_timeout)),
-    );
-    let router: Arc<dyn ResonateRouter> = Arc::new(TransportDispatcher::new(workers));
+    // The ring: the server holds the router, the router holds the worker, and
+    // the worker calls the server back. `new_cyclic` is what closes it.
+    let state = Arc::new_cyclic(|weak: &Weak<Server>| {
+        let mut workers: HashMap<String, Arc<dyn ResonateWorker>> = HashMap::new();
+        workers.insert(
+            SCHEME.to_string(),
+            Arc::new(LateWorker {
+                server: weak.clone(),
+                config: plugin_config(),
+                lease_timeout,
+                worker: OnceLock::new(),
+            }),
+        );
+        let router: Arc<dyn ResonateRouter> = Arc::new(TransportDispatcher::new(workers));
+        let timer = deadlines::build(&config.timeouts, weak.clone());
+        Server::new(config, engine, router, timer)
+    });
+
+    state.router().init(false).await.expect("worker started");
+    state.start_timer().await;
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     tokio::spawn(processing_timeouts::timeout_processing_loop(
         state.clone(),
-        shutdown_rx.clone(),
-    ));
-    tokio::spawn(processing_messages::message_processing_loop(
-        state.clone(),
-        router,
         shutdown_rx,
     ));
     (state, shutdown_tx)
+}
+
+/// The plugin's worker, built on first delivery.
+///
+/// The frame takes the server port as an `Arc`, and the server is what owns
+/// the router that owns this — so the strong handle does not exist yet when
+/// the router is constructed. `Arc::new_cyclic` hands out a weak one, and
+/// this upgrades it the first time a message arrives, by which point the
+/// server is live. Nothing else about the frame's path changes: `send` below
+/// is the real `Worker::send`.
+struct LateWorker {
+    server: Weak<Server>,
+    config: Config,
+    lease_timeout: i64,
+    worker: OnceLock<Worker>,
+}
+
+#[async_trait]
+impl ResonateWorker for LateWorker {
+    async fn send(&self, address: &str, msg: &Message) -> Result<(), Unavailable> {
+        let worker = self.worker.get_or_init(|| {
+            let port: Arc<dyn ResonateServer> =
+                self.server.upgrade().expect("the server is alive");
+            Worker::new(port, self.config.clone(), self.lease_timeout)
+        });
+        worker.send(address, msg).await
+    }
 }
 
 /// §2, from the environment §5.2 exports, with `poll` at 1s.
