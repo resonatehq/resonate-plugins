@@ -35,11 +35,19 @@ def main(root):
     if not os.path.exists(rs_p): return _report(name, errs, warns, notes)
     rs = open(rs_p).read()
 
-    # C-1 template placeholders replaced
+    # C-1 template placeholders replaced. Only the reference's own five
+    # placeholder sites count: `{name}` also appears legitimately as a Rust
+    # inline format capture of a local named `name`.
+    PLACEHOLDERS = ('resonate-plugin-{name}', 'SCHEME: &str = "{name}"',
+                    'The {name} plugin', 'plugins/{name}/spec')
     for f in ["Cargo.toml", "src/lib.rs", "src/plugin.rs"]:
         p = f"{root}/src/{f}"
-        if os.path.exists(p) and "{name}" in open(p).read():
-            errs.append(f"C-1: {f} still contains the '{{name}}' placeholder")
+        if not os.path.exists(p):
+            continue
+        body = open(p).read()
+        for ph in PLACEHOLDERS:
+            if ph in body:
+                errs.append(f"C-1: {f} still contains the template placeholder {ph!r}")
     lib = open(f"{root}/src/src/lib.rs").read() if os.path.exists(f"{root}/src/src/lib.rs") else ""
     m = re.search(r'SCHEME: &str = "([a-z0-9]+)"', lib)
     if m and m.group(1) != name:
@@ -62,15 +70,19 @@ def main(root):
 
     # C-4 rejection codes: specification python <-> rust
     spec_codes = set(re.findall(r'"code":\s*"([a-z_]+)"', py))
-    rust_codes = (set(re.findall(r'"code":\s*"([a-z_]+)"', rs))
-                  | set(re.findall(r'reject\(\s*"([a-z_]+)"', rs))
-                  | set(re.findall(r'"([a-z_]+)"\s*\}?\s*else', rs))
-                  | set(re.findall(r'=>\s*"([a-z_]+)"', rs)))
+    # A code may reach reject() through a variable, so the net that decides
+    # "missing from the crate" is deliberately wide. Deciding "not in the
+    # specification" needs the narrow net, or every string literal in a
+    # match arm is reported as a stray code.
+    declared = (set(re.findall(r'"code":\s*"([a-z_]+)"', rs))
+                | set(re.findall(r'reject\(\s*"([a-z_]+)"', rs)))
+    reachable = (declared
+                 | set(re.findall(r'"([a-z_]+)"\s*\}?\s*else', rs))
+                 | set(re.findall(r'=>\s*"([a-z_]+)"', rs)))
     frame = {"unknown_func", "invalid_request"}
-    for c in sorted(spec_codes - rust_codes - frame):
+    for c in sorted(spec_codes - reachable - frame):
         errs.append(f"C-4: code '{c}' is constructed in the specification but not in the crate")
-    for c in sorted(rust_codes - spec_codes - frame):
-        if c in ("halt", "release", "resolved", "rejected"): continue
+    for c in sorted(declared - spec_codes - frame):
         warns.append(f"C-4: code '{c}' is constructed in the crate but not in the specification")
 
     # C-5 no provider fact in the crate that is not in the specification
