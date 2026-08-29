@@ -208,7 +208,7 @@
 | Google Workspace Admin | [ ] | [ ] |
 | Gotify | [x] | [x] |
 | GoToWebinar | [ ] | [ ] |
-| Grafana | [ ] | [ ] |
+| Grafana | [x] | [x] |
 | GraphQL | [ ] | [ ] |
 | Grist | [ ] | [ ] |
 | Gumroad | [ ] | [ ] |

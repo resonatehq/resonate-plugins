@@ -1,0 +1,6 @@
+# The tests run against the Grafana the specification's §5 provisions — one
+# container, shared by every test in every binary, and its `FixtureFail` data
+# source is a single-threaded stub HTTP server. The tests are therefore
+# serial: the provider is the shared fixture, not the test binary.
+[env]
+RUST_TEST_THREADS = "1"
