@@ -19,6 +19,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
 [dev-dependencies]
 # The in-process Resonate server the end-to-end test compiles the worker into.
 resonate = { git = "https://github.com/resonatehq/resonate", branch = "core-crate" }
+# The storage engine that server takes: the end-to-end test opens an
+# in-memory SQLite one so nothing it writes outlives the test.
+resonate-server-dbms = { git = "https://github.com/resonatehq/resonate", branch = "core-crate", default-features = false, features = ["sqlite"] }
 tokio = { version = "1", features = ["rt-multi-thread", "time", "macros", "sync"] }
 # Zendesk is SaaS only — the specification has no §5 — so the tests stand a
 # local HTTP mock where the provider would be.

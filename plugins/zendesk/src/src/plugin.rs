@@ -13,10 +13,9 @@ use crate::worker::{b64_decode, sanitize};
 /// Specification §2, translated: bare field = required (a serde default
 /// satisfies it), Option<T> = optional, `= poll` cascades via accessor.
 ///
-/// `subdomain` defaults to `= instance` — the address instance name. The
-/// frame hands `process` the promise, not the address, so that cascade
-/// belongs to whoever loads the configuration section: this field is the
-/// already-cascaded value.
+/// `subdomain` carries `= instance` in §2: the address's instance is resolved
+/// by whoever loads the config section, never by the plugin — which never sees
+/// the address — so the field is simply required here.
 #[derive(Clone, Deserialize)]
 pub struct Config {
     pub subdomain: String,
@@ -27,7 +26,7 @@ pub struct Config {
 }
 
 fn poll_default() -> Duration {
-    Duration::from_secs(15 * 60)
+    Duration::from_secs(2)
 }
 
 /// The verdict vocabulary of [`process`], named once so the helpers below can
@@ -42,6 +41,9 @@ type Verdict = Result<Result<String, String>, Result<String, String>>;
 /// A failure that is not a verdict on the promise: halt or release. Every
 /// helper returns this on its error channel so `?` propagates it unchanged.
 type Failure = Result<String, String>;
+
+/// §4.7: the job status values that end the merge poll loop.
+const JOB_TERMINAL: [&str; 3] = ["completed", "failed", "killed"];
 
 /// One call per delivered task. Complete the operation: begin, poll to
 /// its terminal state, decide.
@@ -77,8 +79,13 @@ pub async fn process(config: &Config, promise: &PromiseRecord) -> Verdict {
 
     match func {
         "ticket.create" => ticket_create(config, promise, &args).await,
-        "ticket.comment" => ticket_comment(config, &args).await,
         "ticket.get" => ticket_get(config, &args).await,
+        "ticket.list" => ticket_list(config, &args).await,
+        "ticket.search" => ticket_search(config, &args).await,
+        "ticket.update" => ticket_update(config, &args).await,
+        "ticket.delete" => ticket_delete(config, &args).await,
+        "ticket.merge" => ticket_merge(config, promise, &args).await,
+        "ticketcomment.list" => ticketcomment_list(config, &args).await,
         _ => Ok(Err(json!({"code": "unknown_func", "detail": func}).to_string())),
     }
 }
@@ -92,188 +99,358 @@ fn decode_param(promise: &PromiseRecord) -> Result<Value, String> {
 
 // ─── Operations ───────────────────────────────────────────────────────────────
 
-/// Specification §4.1, translated from its Python. Begin idempotently
-/// (duplicate = re-attach where the provider supports it), then poll on
-/// the downstream clock — the worker frame heartbeats the lease
-/// independently, so this cadence may back off freely.
+/// Specification §4.1, translated from its Python.
 async fn ticket_create(cfg: &Config, promise: &PromiseRecord, args: &Value) -> Verdict {
     let api = api(cfg);
-    let external_id = sanitize(&promise.id);
-
-    // §4.1.1 requires `comment`, an object.
-    if let Err(e) = require_object(args, "comment") {
-        return reject("invalid_request", Some(json!(e)));
+    let auth = auth(cfg);
+    // The 4.1.1 Param schema requires `comment`, and a promise's param is
+    // immutable: no redelivery would read it differently.
+    if !args.get("comment").map(Value::is_object).unwrap_or(false) {
+        return reject(
+            "invalid_request",
+            Some(json!("args.comment is required and must be an object")),
+        );
     }
+    let key = sanitize(&promise.id);
 
-    // Locate our ticket by the stamped external_id: on re-entry this
-    // recovers the ticket a previous attempt created.
+    // The Idempotency-Key is honoured for two hours only; past that window the
+    // external_id stamped below is the sole handle on the ticket this promise
+    // created. Filtering by external_id is a list query, not a unique lookup:
+    // Zendesk does not enforce uniqueness on external_id. The lookup costs one
+    // request on every delivery, the first included, and pays only past that
+    // window.
     let r = get(
-        cfg,
-        &format!("{api}/tickets"),
-        &[("external_id", external_id.clone())],
+        &format!("{}/tickets", api),
+        &auth,
+        &[("external_id".to_string(), key.clone())],
     )
     .await?;
     check(&r)?;
-    let hits = r.json();
-    let hits = hits["tickets"].as_array().cloned().unwrap_or_default();
+    if r.status >= 400 {
+        return reject("invalid_request", Some(json!(r.text)));
+    }
+    let found = r.json();
+    let found = found.get("tickets").and_then(Value::as_array);
+    if let Some(first) = found.and_then(|t| t.first()) {
+        return Ok(Ok(first.to_string()));
+    }
 
-    let tid = if !hits.is_empty() {
-        // external_id is not unique: pick deterministically
-        match hits.iter().filter_map(|t| t["id"].as_i64()).min() {
-            Some(id) => id,
-            None => return Err(Err(format!("ticket without an id: {}", r.text))),
-        }
-    } else {
-        // The Idempotency-Key makes a duplicate POST inside the 2h window
-        // a safe replay.
-        let mut ticket: Map<String, Value> = args.as_object().cloned().unwrap_or_default();
-        ticket.insert("external_id".into(), json!(external_id));
-        let r = send(
-            auth(client().post(format!("{api}/tickets")), cfg)
-                .header("Idempotency-Key", &external_id)
-                .json(&json!({ "ticket": Value::Object(ticket) })),
-        )
-        .await?;
-        if r.status == 400 || r.status == 404 || r.status == 422 {
-            return reject("invalid_request", Some(r.json()));
-        }
-        check(&r)?;
-        match r.json()["ticket"]["id"].as_i64() {
-            Some(id) => id,
-            None => return Err(Err(format!("no ticket.id in the create response: {}", r.text))),
-        }
+    let r = send(
+        client()
+            .post(format!("{}/tickets", api))
+            .header("Authorization", &auth)
+            .header("Idempotency-Key", &key)
+            .json(&json!({"ticket": with_external_id(args, &key)})),
+    )
+    .await?;
+    check(&r)?;
+    if r.status >= 400 {
+        // 400 ParameterMissing for a malformed body, 422 RecordInvalid for a
+        // field the account rejects.
+        return reject("invalid_request", Some(json!(r.text)));
+    }
+    Ok(Ok(field(&r.json(), "ticket").to_string()))
+}
+
+/// Specification §4.2, translated from its Python.
+async fn ticket_get(cfg: &Config, args: &Value) -> Verdict {
+    let api = api(cfg);
+    let auth = auth(cfg);
+    let ticket_id = match arg_id(args, "ticket_id") {
+        Ok(v) => v,
+        Err(e) => return reject("invalid_request", Some(json!(e))),
     };
 
-    // "solved" is NOT terminal — it reopens on customer reply; only
-    // "closed" is frozen.
-    let ticket = loop {
+    let r = get(
+        &format!("{}/tickets/{}", api, ticket_id),
+        &auth,
+        &query(args, &["include"]),
+    )
+    .await?;
+    // A deleted ticket answers 404 here; it stays listed by
+    // GET /api/v2/deleted_tickets until it is purged.
+    if r.status == 404 {
+        return reject("not_found", Some(json!(r.text)));
+    }
+    check(&r)?;
+    if r.status >= 400 {
+        return reject("invalid_request", Some(json!(r.text)));
+    }
+    Ok(Ok(field(&r.json(), "ticket").to_string()))
+}
+
+/// Specification §4.3, translated from its Python.
+async fn ticket_list(cfg: &Config, args: &Value) -> Verdict {
+    let api = api(cfg);
+    let auth = auth(cfg);
+
+    let r = get(
+        &format!("{}/tickets", api),
+        &auth,
+        &query(
+            args,
+            &[
+                "external_id",
+                "include",
+                "page[size]",
+                "page[after]",
+                "page[before]",
+            ],
+        ),
+    )
+    .await?;
+    check(&r)?;
+    if r.status >= 400 {
+        return reject("invalid_request", Some(json!(r.text)));
+    }
+    Ok(Ok(r.text))
+}
+
+/// Specification §4.4, translated from its Python.
+async fn ticket_search(cfg: &Config, args: &Value) -> Verdict {
+    let api = api(cfg);
+    let auth = auth(cfg);
+    // The 4.4.1 Param schema requires `query`.
+    let Some(_) = args.get("query").and_then(Value::as_str) else {
+        return reject(
+            "invalid_request",
+            Some(json!("args.query is required and must be a string")),
+        );
+    };
+    let mut params = query(args, &["query", "page[size]", "page[after]"]);
+    // The exported object type is given in filter[type]; a type: term inside the
+    // query string is an error on this endpoint.
+    params.push(("filter[type]".to_string(), "ticket".to_string()));
+
+    let r = get(&format!("{}/search/export", api), &auth, &params).await?;
+    check(&r)?;
+    if r.status >= 400 {
+        // 422 {"error": "invalid", "description": ...} for a malformed query or
+        // an expired cursor.
+        return reject("invalid_request", Some(json!(r.text)));
+    }
+    Ok(Ok(r.text))
+}
+
+/// Specification §4.5, translated from its Python.
+async fn ticket_update(cfg: &Config, args: &Value) -> Verdict {
+    let api = api(cfg);
+    let auth = auth(cfg);
+    let ticket_id = match arg_id(args, "ticket_id") {
+        Ok(v) => v,
+        Err(e) => return reject("invalid_request", Some(json!(e))),
+    };
+    let body = without(args, "ticket_id");
+
+    // This endpoint takes no idempotency key: a re-delivery re-applies the field
+    // values, which converge, but appends the comment in the body a second time.
+    let r = send(
+        client()
+            .put(format!("{}/tickets/{}", api, ticket_id))
+            .header("Authorization", &auth)
+            .json(&json!({ "ticket": body })),
+    )
+    .await?;
+    if r.status == 404 {
+        return reject("not_found", Some(json!(r.text)));
+    }
+    if r.status == 409 {
+        // safe_update: the ticket changed after updated_stamp.
+        return reject("conflict", Some(json!(r.text)));
+    }
+    check(&r)?;
+    if r.status >= 400 {
+        // 422 RecordInvalid, which is also the answer for any update to a
+        // closed ticket.
+        return reject("invalid_request", Some(json!(r.text)));
+    }
+    Ok(Ok(field(&r.json(), "ticket").to_string()))
+}
+
+/// Specification §4.6, translated from its Python.
+async fn ticket_delete(cfg: &Config, args: &Value) -> Verdict {
+    let api = api(cfg);
+    let auth = auth(cfg);
+    let ticket_id = match arg_id(args, "ticket_id") {
+        Ok(v) => v,
+        Err(e) => return reject("invalid_request", Some(json!(e))),
+    };
+
+    let r = send(
+        client()
+            .delete(format!("{}/tickets/{}", api, ticket_id))
+            .header("Authorization", &auth),
+    )
+    .await?;
+    // Also the answer once this promise's own delete has landed: the ticket is
+    // soft-deleted and this endpoint no longer sees it.
+    if r.status == 404 {
+        return reject("not_found", Some(json!(r.text)));
+    }
+    check(&r)?;
+    if r.status >= 400 {
+        return reject("invalid_request", Some(json!(r.text)));
+    }
+    Ok(Ok(json!({"id": args["ticket_id"], "deleted": true}).to_string()))
+}
+
+/// Specification §4.7, translated from its Python. Queue the merge, then poll
+/// its job status on the downstream clock — the worker frame heartbeats the
+/// lease independently, so this cadence may back off freely.
+async fn ticket_merge(cfg: &Config, promise: &PromiseRecord, args: &Value) -> Verdict {
+    let api = api(cfg);
+    let auth = auth(cfg);
+    let ticket_id = match arg_id(args, "ticket_id") {
+        Ok(v) => v,
+        Err(e) => return reject("invalid_request", Some(json!(e))),
+    };
+    // The 4.7.1 Param schema requires `ids`.
+    if !args.get("ids").map(Value::is_array).unwrap_or(false) {
+        return reject(
+            "invalid_request",
+            Some(json!("args.ids is required and must be an array")),
+        );
+    }
+    let body = without(args, "ticket_id");
+
+    // No idempotency key on this endpoint, and nothing on the job status ties it
+    // to the promise: a re-delivery queues a second merge whose sources are by
+    // then closed, so its results report them as failures.
+    let r = send(
+        client()
+            .post(format!("{}/tickets/{}/merge", api, ticket_id))
+            .header("Authorization", &auth)
+            .json(&body),
+    )
+    .await?;
+    if r.status == 404 {
+        return reject("not_found", Some(json!(r.text)));
+    }
+    check(&r)?;
+    if r.status >= 400 {
+        return reject("invalid_request", Some(json!(r.text)));
+    }
+
+    let mut job = field(&r.json(), "job_status");
+    let mut failures = 0u32;
+    while !JOB_TERMINAL.contains(&status(&job)) {
         let now = now_ms();
         if now >= promise.timeout_at {
             return Err(Err("promise timed out".into()));
-        }
-        let r = get(cfg, &format!("{api}/tickets/{tid}"), &[]).await?;
-        if r.status == 404 {
-            return reject("deleted", None); // soft-deleted before closing
-        }
-        check(&r)?;
-        let t = r.json()["ticket"].clone();
-        if t["status"].as_str() == Some("closed") {
-            break t;
         }
         // Never sleep past the promise deadline: the next iteration has to
         // observe it and stop rather than wake after the server has already
         // settled the promise.
         let remaining = Duration::from_millis((promise.timeout_at - now).max(0) as u64);
         tokio::time::sleep(cfg.poll.min(remaining)).await;
-    };
+        let url = format!("{}/job_statuses/{}", api, quote(&text(&job, "id")));
+        let r = match get(&url, &auth, &[]).await {
+            Ok(r) => r,
+            // A halt is an operator's to clear; it does not get absorbed.
+            Err(Ok(reason)) => return Err(Ok(reason)),
+            Err(Err(reason)) => {
+                failures += 1;
+                if failures >= 5 {
+                    return Err(Err(reason));
+                }
+                continue;
+            }
+        };
+        if r.status == 404 {
+            return reject("job_not_found", Some(json!(r.text)));
+        }
+        match check(&r) {
+            Ok(()) => {}
+            Err(Ok(reason)) => return Err(Ok(reason)),
+            Err(Err(reason)) => {
+                // The merge is already queued and its job id is only held here:
+                // absorb the transient answer, bounded by the streak cap.
+                failures += 1;
+                if failures >= 5 {
+                    return Err(Err(reason));
+                }
+                continue;
+            }
+        }
+        if r.status >= 400 {
+            return reject("invalid_request", Some(json!(r.text)));
+        }
+        job = field(&r.json(), "job_status");
+        failures = 0;
+    }
 
-    let keys = ["id", "status", "subject", "tags", "created_at", "updated_at"];
-    // The 4.1.2 Resolved mapping.
-    let value: Map<String, Value> = keys
-        .iter()
-        .map(|k| ((*k).to_string(), ticket.get(*k).cloned().unwrap_or(Value::Null)))
-        .collect();
-    Ok(Ok(Value::Object(value).to_string()))
+    if status(&job) == "completed" {
+        // The 4.7.2 Resolved mapping. An absent key is null, not a crash.
+        let keys = ["id", "url", "status", "message", "progress", "total", "results"];
+        let mut value = Map::new();
+        for k in keys {
+            value.insert(k.to_string(), job.get(k).cloned().unwrap_or(Value::Null));
+        }
+        return Ok(Ok(Value::Object(value).to_string()));
+    }
+    if status(&job) == "killed" {
+        return reject("killed", Some(job));
+    }
+    // detail = the terminal job status object.
+    reject("merge_failed", Some(job))
 }
 
-/// Specification §4.2, translated from its Python.
-async fn ticket_comment(cfg: &Config, args: &Value) -> Verdict {
+/// Specification §4.8, translated from its Python.
+async fn ticketcomment_list(cfg: &Config, args: &Value) -> Verdict {
     let api = api(cfg);
-
-    let id = match arg_i64(args, "id") {
-        Ok(id) => id,
-        Err(e) => return reject("invalid_request", Some(json!(e))),
-    };
-    // §4.2.1 requires `comment`, an object, with a `body` string.
-    let comment = match require_object(args, "comment") {
-        Ok(c) if c.get("body").map(Value::is_string) == Some(true) => Value::Object(c.clone()),
-        Ok(_) => {
-            let e = "args.comment.body is required and must be a string";
-            return reject("invalid_request", Some(json!(e)));
-        }
+    let auth = auth(cfg);
+    let ticket_id = match arg_id(args, "ticket_id") {
+        Ok(v) => v,
         Err(e) => return reject("invalid_request", Some(json!(e))),
     };
 
-    // The PUT is unkeyed: best-effort dedup — scan the newest 100 comments
-    // for an identical body before re-PUTting.
     let r = get(
-        cfg,
-        &format!("{api}/tickets/{id}/comments"),
-        &[("sort_order", "desc".into()), ("per_page", "100".into())],
+        &format!("{}/tickets/{}/comments", api, ticket_id),
+        &auth,
+        &query(
+            args,
+            &[
+                "include",
+                "include_inline_images",
+                "sort",
+                "page[size]",
+                "page[after]",
+                "page[before]",
+            ],
+        ),
     )
     .await?;
+    // A deleted ticket answers 404 here, as does a ticket the credentials
+    // cannot see.
     if r.status == 404 {
-        return reject("not_found", None);
+        return reject("not_found", Some(json!(r.text)));
     }
     check(&r)?;
-    let landed = r.json()["comments"]
-        .as_array()
-        .map(|cs| cs.iter().any(|c| c["body"] == comment["body"]))
-        .unwrap_or(false);
-
-    if !landed {
-        let r = send(
-            auth(client().put(format!("{api}/tickets/{id}")), cfg)
-                .json(&json!({ "ticket": { "comment": comment } })),
-        )
-        .await?;
-        if r.status == 404 {
-            return reject("not_found", None);
-        }
-        if r.status == 400 || r.status == 422 {
-            let body = r.json();
-            // 422 covers all validation failures; "closed" only when the
-            // frozen-ticket signal is present.
-            let closed = body
-                .get("details")
-                .map(Value::to_string)
-                .unwrap_or_default()
-                .to_lowercase()
-                .contains("closed");
-            let code = if closed { "closed" } else { "invalid_request" };
-            return reject(code, Some(body));
-        }
-        check(&r)?;
-        return Ok(Ok(r.json()["ticket"].to_string()));
+    if r.status >= 400 {
+        return reject("invalid_request", Some(json!(r.text)));
     }
-
-    // Landed previously: resolve with the current record.
-    let r = get(cfg, &format!("{api}/tickets/{id}"), &[]).await?;
-    check(&r)?;
-    Ok(Ok(r.json()["ticket"].to_string()))
-}
-
-/// Specification §4.3, translated from its Python.
-async fn ticket_get(cfg: &Config, args: &Value) -> Verdict {
-    let api = api(cfg);
-    let tid = match arg_i64(args, "id") {
-        Ok(id) => id,
-        Err(e) => return reject("invalid_request", Some(json!(e))),
-    };
-
-    let r = get(cfg, &format!("{api}/tickets/{tid}"), &[]).await?;
-    if r.status == 404 {
-        return reject("not_found", None);
-    }
-    check(&r)?;
-    Ok(Ok(r.json()["ticket"].to_string()))
+    Ok(Ok(r.text))
 }
 
 // ─── Authentication (§3) ──────────────────────────────────────────────────────
 
-/// An API token, sent as HTTP Basic `{email}/token:{api_token}`: there is no
-/// token exchange to make, so the only way the credential can be found wanting
-/// is a 401/403 on the call itself.
-fn auth(req: reqwest::RequestBuilder, cfg: &Config) -> reqwest::RequestBuilder {
-    req.basic_auth(format!("{}/token", cfg.email), Some(&cfg.api_token))
+/// §3: an API token is presented as HTTP Basic, the user being
+/// `{email}/token`. There is no token exchange to make, so the only way the
+/// credential can be found wanting is a 401/403 on the call itself.
+fn auth(cfg: &Config) -> String {
+    use base64::Engine;
+    let basic = base64::engine::general_purpose::STANDARD
+        .encode(format!("{}/token:{}", cfg.email, cfg.api_token));
+    format!("Basic {basic}")
 }
 
 // ─── HTTP ─────────────────────────────────────────────────────────────────────
 
-/// The API root of the specification's front matter, composed from §2's
-/// `subdomain`. Overridable only through the environment: Zendesk is SaaS only
-/// — there is no §5 provider to run — so the tests stand a local mock in its
-/// place and point the plugin at it. Read once, before any request goes out.
+/// The API root of the specification's front matter, per account subdomain.
+/// Overridable only through the environment: Zendesk is SaaS only — there is
+/// no §5 provider to run — so the tests stand a local mock in its place and
+/// point the plugin at it. The override is read once, before any request goes
+/// out.
 fn api(cfg: &Config) -> String {
     static OVERRIDE: OnceLock<Option<String>> = OnceLock::new();
     match OVERRIDE.get_or_init(|| std::env::var("ZENDESK_API").ok()) {
@@ -297,11 +474,16 @@ impl Response {
 /// The specification's `_check`: the classification every response that is
 /// not one of an operation's enumerated outcomes falls through to.
 fn check(r: &Response) -> Result<(), Failure> {
-    // 401 token rejected, 403 role lacks permission — an operator must act.
+    // 401 "Couldn't authenticate you" and 403 (the agent's role, or the token's
+    // scope, does not permit the action) end only when an operator acts.
     if r.status == 401 || r.status == 403 {
         return Err(Ok(r.text.clone()));
     }
-    if r.status >= 400 {
+    // Every documented Zendesk limit answers 429 with Retry-After and resets on
+    // its own: the account limit per minute, and the per-endpoint limits (30
+    // updates per 10 minutes per user per ticket, 400 ticket deletions per
+    // minute, 100 search exports per minute).
+    if r.status == 429 || r.status >= 500 {
         return Err(Err(r.text.clone()));
     }
     Ok(())
@@ -314,12 +496,8 @@ fn client() -> reqwest::Client {
     CLIENT.get_or_init(reqwest::Client::new).clone()
 }
 
-async fn get(
-    cfg: &Config,
-    url: &str,
-    params: &[(&str, String)],
-) -> Result<Response, Failure> {
-    send(auth(client().get(url), cfg).query(params)).await
+async fn get(url: &str, auth: &str, params: &[(String, String)]) -> Result<Response, Failure> {
+    send(client().get(url).header("Authorization", auth).query(params)).await
 }
 
 async fn send(req: reqwest::RequestBuilder) -> Result<Response, Failure> {
@@ -347,21 +525,100 @@ fn reject(code: &str, detail: Option<Value>) -> Verdict {
     Ok(Err(value.to_string()))
 }
 
-/// A required integer argument of an operation's Param schema.
+/// The create body: the args as given, plus the injected identity.
+/// `external_id` is `sanitize(promise.id)`, never the raw id — it is the
+/// handle on the ticket once the two hour Idempotency-Key window has passed.
+fn with_external_id(args: &Value, key: &str) -> Value {
+    let mut body: Map<String, Value> = args.as_object().cloned().unwrap_or_default();
+    body.insert("external_id".into(), json!(key));
+    Value::Object(body)
+}
+
+/// The args minus one key: the request body of an operation whose id travels
+/// in the path.
+fn without(args: &Value, key: &str) -> Value {
+    let mut body: Map<String, Value> = args.as_object().cloned().unwrap_or_default();
+    body.remove(key);
+    Value::Object(body)
+}
+
+/// A required integer argument of an operation's Param schema, rendered as the
+/// path segment the Python's `quote(str(...))` produces.
 ///
-/// A promise's param is immutable, so a param that does not satisfy the
-/// schema now does not satisfy it on any redelivery: permanent.
-fn arg_i64(args: &Value, key: &str) -> Result<i64, String> {
+/// A promise's param is immutable, so a param that does not satisfy the schema
+/// now does not satisfy it on any redelivery: permanent, and `invalid_request`
+/// is the code every Rejected schema here carries for it.
+fn arg_id(args: &Value, key: &str) -> Result<String, String> {
     args.get(key)
         .and_then(Value::as_i64)
+        .map(|v| quote(&v.to_string()))
         .ok_or_else(|| format!("args.{key} is required and must be an integer"))
 }
 
-/// A required object argument of an operation's Param schema.
-fn require_object<'a>(args: &'a Value, key: &str) -> Result<&'a Map<String, Value>, String> {
-    args.get(key)
-        .and_then(Value::as_object)
-        .ok_or_else(|| format!("args.{key} is required and must be an object"))
+/// A field of a response body — absent (or a body that is not the documented
+/// object) reads as JSON null rather than crashing.
+fn field(body: &Value, key: &str) -> Value {
+    body.get(key).cloned().unwrap_or(Value::Null)
+}
+
+/// `job_status.status` — absent reads as no status at all, which never matches
+/// a terminal value: the loop then runs to the promise deadline rather than
+/// reporting a merge it never observed.
+fn status(job: &Value) -> &str {
+    job.get("status").and_then(Value::as_str).unwrap_or_default()
+}
+
+/// A string field of a response body, empty when absent.
+fn text(body: &Value, key: &str) -> String {
+    body.get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// The specification's `_query`: one pair per named argument that is present.
+/// A boolean renders lowercase — Python's own `str(True)` would not — and an
+/// array renders comma-joined. A null is dropped rather than sent as the
+/// string "null", which is what `requests` does with a `None` parameter.
+fn query(args: &Value, keys: &[&str]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for key in keys {
+        let Some(value) = args.get(*key) else {
+            continue;
+        };
+        let rendered = match value {
+            Value::Null => continue,
+            Value::Bool(b) => (if *b { "true" } else { "false" }).to_string(),
+            Value::String(s) => s.clone(),
+            Value::Array(items) => items
+                .iter()
+                .map(|item| match item {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(","),
+            other => other.to_string(),
+        };
+        out.push(((*key).to_string(), rendered));
+    }
+    out
+}
+
+/// Percent-encode one path segment, as the Python's `quote(..., safe="")`
+/// does. Ticket and job ids are caller-supplied: a segment is a segment, never
+/// a way out of the path.
+fn quote(segment: &str) -> String {
+    let mut out = String::with_capacity(segment.len());
+    for b in segment.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(*b as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
 }
 
 fn now_ms() -> i64 {
