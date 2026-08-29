@@ -12,11 +12,39 @@ every step below; your final message is the findings report.
 
 ## Procedure
 
-1. Read the specification and `skills/plugin-specify/SKILL.md` (the format
-   and the plugin contract the document is written against).
+1. Read `skills/plugin-specify/SKILL.md` (the format and the plugin
+   contract the document is written against), then the specification's
+   header and §3 only — enough to know the provider, its API base, and
+   where its documentation lives. **Do not read §4 yet.**
 2. Fetch the provider's live documentation and the OpenAPI spec from the
    header's Notes table. Do not use memorized API knowledge.
-3. Verify facts: every endpoint, method, field name, status code, enum,
+3. From that documentation alone, write **§0 API Surface**: the API
+   surface a caller wanting to drive this provider from an SDK wants.
+   Name each call by its method and path, grouped by resource, and say in
+   a clause what a caller uses it for. Judge it as someone building on
+   this provider: the primary resource and its lifecycle, the durable
+   units it offers, the reads that find ids and constrain arguments.
+   Apply plugin-specify's Bounds — instance administration and transport
+   mechanics are out.
+
+   Write this before reading §4, and do not revise it afterwards. Its
+   whole value is being an independent answer: derived from the provider,
+   not recovered from the document under review. Then read §4 and compare.
+   Coverage gaps are findings like any other, cited against §0:
+
+   - a call a caller plainly needs and cannot make → **significant**;
+     a plugin that can create a record but not read or update it is not
+     an integration a caller can build on.
+   - a peripheral call a caller would occasionally want → **minor**.
+   - an operation §4 exposes that §0 does not want — administration,
+     transport mechanics, an inflated read — → **minor**, since surface
+     nobody asked for is surface to maintain and to get wrong.
+
+   Where §4 and §0 disagree because the provider's API cannot support
+   what a caller wants (no trigger endpoint, a resource only writable out
+   of band), that is not a finding against the specification: say so in
+   §0 and move on. A plugin cannot expose what the provider does not.
+4. Verify facts: every endpoint, method, field name, status code, enum,
    default, and idempotency claim against the fetched documentation.
    Where the documentation is silent, the provider's shipped source and
    configuration (inside the container) are sanctioned evidence — record
@@ -24,7 +52,7 @@ every step below; your final message is the findings report.
    contradicts a published statement: executed evidence beats the OpenAPI
    beats the narrative docs — and report the contradiction as its own
    finding.
-4. Verify internal consistency:
+5. Verify internal consistency:
    - every `= promise.param.x` in an Integration Request exists in the
      Promise Param Schema with the same type;
    - every `= response.body.x` in a Promise Value Schema exists in the
@@ -39,7 +67,7 @@ every step below; your final message is the findings report.
      call; every `Exception("halt", ...)` site rests on a
      provider-documented operator-required condition; everything
      unclassified raises (release).
-5. If the specification has a §5, execute the implementation manually:
+6. If the specification has a §5, execute the implementation manually:
    1. Run 5.1/5.2: write the 5.1 block to `spec/Dockerfile` (a generated,
       gitignored artifact — overwrite whatever is there; finding a
       pre-existing file is expected, not a finding), run the 5.2 block;
@@ -71,12 +99,17 @@ every step below; your final message is the findings report.
       rather than engineering around it.
    5. Tear the environment down: remove the container and the image;
       leave the generated `spec/Dockerfile`.
-6. Fill the empty `| **Reviewed by** | |` row with your model name and
+7. Fill the empty `| **Reviewed by** | |` row with your model name and
    the date, exactly as `<Model Name>, YYYY-MM-DD` (e.g.
    `Claude Opus, 2026-08-26`). Make no other edits: propose fixes in the
    report, do not apply them.
 
 ## Report
+
+Open with `# 0. API Surface` — the surface from step 3, verbatim as you
+wrote it before reading §4 — then the coverage paragraph, then the
+findings. A reader who disagrees with a coverage finding needs to see the
+yardstick that produced it.
 
 Findings ranked blocking / significant / minor / nit:
 
@@ -89,10 +122,14 @@ Findings ranked blocking / significant / minor / nit:
 - **nit** — incompleteness: an undeclared-but-present field (unless the
   implementation reads it — then minor), a missing constraint.
 
-Each finding: section
-number, what is wrong, the correct fact with the URL or the executed call
-that proves it. Do not list what is correct; a one-paragraph coverage
-summary (what was executed and confirmed) is allowed alongside the
-verdict. End with one verdict, by rubric: any blocking finding → reject;
+Coverage findings — §4 against §0 — take the rank step 3 gives them:
+significant for a call a caller plainly needs, minor for a peripheral one
+or for surface §0 does not want.
+
+Each finding: section number, what is wrong, the correct fact with the URL
+or the executed call that proves it — for a coverage finding, the §0 entry
+it fails against. Do not list what is correct: §0 and a one-paragraph
+coverage summary (what was executed and confirmed) are the only exceptions,
+and they belong at the top rather than among the findings. End with one verdict, by rubric: any blocking finding → reject;
 significant findings only → approve-with-fixes; minor and nit only →
 approve.

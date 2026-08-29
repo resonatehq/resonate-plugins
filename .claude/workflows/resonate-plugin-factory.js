@@ -215,7 +215,7 @@ const REVIEW = {
   properties: {
     verdict: { type: 'string', enum: ['approve', 'approve-with-fixes', 'reject'] },
     has_findings: { type: 'boolean' },
-    findings_report: { type: 'string', description: 'The full findings report, verbatim, ranked as the skill prescribes' },
+    findings_report: { type: 'string', description: 'The full findings report, verbatim: the §0 API Surface section, the coverage paragraph, then the findings ranked as the skill prescribes' },
   },
   required: ['verdict', 'has_findings', 'findings_report'],
 }
