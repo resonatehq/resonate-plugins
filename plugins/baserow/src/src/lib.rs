@@ -5,8 +5,6 @@
 //! plugin's scheme; the router reads only the scheme, so adding a plugin
 //! never requires editing core.
 
-// `plugin` is public so `tests/process.rs` can exercise `plugin::process`
-// directly — the plugin's only test surface.
 pub mod plugin;
 mod worker;
 

@@ -4,7 +4,7 @@
 //! together with `plugin::process`. Everything upstream of the worker (the
 //! HTTP edge, the poll transport, auth) is the server's own test surface,
 //! not this crate's, so none of it is compiled in: an in-memory store, the
-//! two background loops, a router holding one worker under one scheme.
+//! timer and its sweep, and a router holding one worker under one scheme.
 //!
 //! Bring the provider up with specification §5.1/§5.2 first — the same
 //! environment `tests/process.rs` uses.
@@ -17,96 +17,155 @@ use base64::Engine;
 use serde_json::{json, Value};
 
 use resonate::config::Config as ServerConfig;
-use resonate::persistence::{persistence_sqlite::SqliteStorage, Storage};
-use resonate::processing::{processing_messages, processing_timeouts};
+use resonate::deadlines;
+use resonate::processing::processing_timeouts;
 use resonate::server::Server;
 use resonate::transport::TransportDispatcher;
-use resonate_core::types::{RequestEnvelope, RequestHead, PROTOCOL_VERSION};
-use resonate_core::{ResonateRouter, ResonateServer, ResonateWorker};
+use resonate_core::types::{RequestEnvelope, RequestHead, ResponseEnvelope, PROTOCOL_VERSION};
+use resonate_core::{ResonateRouter, ResonateServer, ResonateWorker, Unavailable};
 use resonate_plugin_baserow::{plugin::Config, Worker, SCHEME};
+use resonate_server_dbms::engine_port::ResonateEngine;
+use resonate_server_dbms::engine_sqlite::SqliteEngine;
 
-/// The succeeding work item §5 provisions: the promise reaches `resolved`,
-/// carrying the §4.1.2 Resolved value of a finished export job.
+/// The succeeding work item: `Tasks` is all text, so the import job §5's
+/// fixture accepts reaches "finished" and the promise reaches `resolved`,
+/// carrying the §4.12.2 Resolved value — including the
+/// `original_file_name` stamp the frame's `sanitize` produced.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_promise_targeting_this_plugin_resolves_from_a_finished_export() {
-    let (server, _shutdown) = harness();
+async fn a_promise_targeting_this_plugin_resolves_from_a_finished_import() {
+    let (server, _shutdown) = harness().await;
     let id = promise_id("e2e-ok");
 
     create(
         &server,
         &id,
-        json!({"func": "export.create", "args": {"table_id": fixture_ok(), "exporter_type": "csv"}}),
+        json!({
+            "func": "table.import",
+            "args": {"table_id": ok_table(), "data": [["e2e", "end to end"]]},
+        }),
     )
     .await;
     let (state, value) = settled(&server, &id).await;
 
     assert_eq!(state, "resolved", "{value}");
-    assert_eq!(value["table"], fixture_ok());
-    assert_eq!(value["exporter_type"], "csv");
     assert_eq!(value["state"], "finished");
-    assert!(value["url"].is_string(), "{value}");
+    assert_eq!(value["type"], "file_import");
+    assert_eq!(value["table_id"], ok_table());
+    assert_eq!(value["report"]["failing_rows"], json!({}));
+    assert!(
+        value["original_file_name"].as_str().unwrap_or_default().starts_with(&id),
+        "{value}"
+    );
 }
 
-/// The failing work item §5 provisions — the trashed table: the promise
-/// reaches `rejected`, carrying the §4.1.2 Rejected value with
-/// `code: table_not_found`.
+/// The failing work item: `Amounts` has a number field, so writing a
+/// non-numeric value to it is rejected by the field and the promise reaches
+/// `rejected`, carrying the §4.3.2 Rejected value with `code:
+/// invalid_request` and a `detail` keyed by field name.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_promise_targeting_this_plugin_rejects_from_a_trashed_table() {
-    let (server, _shutdown) = harness();
+async fn a_promise_targeting_this_plugin_rejects_from_a_refused_value() {
+    let (server, _shutdown) = harness().await;
     let id = promise_id("e2e-fail");
 
     create(
         &server,
         &id,
-        json!({"func": "export.create", "args": {"table_id": fixture_fail(), "exporter_type": "csv"}}),
+        json!({
+            "func": "row.create",
+            "args": {
+                "table_id": fail_table(),
+                "values": {"Label": "e2e", "Amount": "not-a-number"},
+                "user_field_names": true,
+            },
+        }),
     )
     .await;
     let (state, value) = settled(&server, &id).await;
 
     assert_eq!(state, "rejected", "{value}");
-    assert_eq!(value["code"], "table_not_found");
-    assert_eq!(value["detail"]["error"], "ERROR_TABLE_DOES_NOT_EXIST");
+    assert_eq!(value["code"], "invalid_request");
+    assert!(value["detail"]["Amount"].is_array(), "{value}");
 }
 
 // ─── The server ───────────────────────────────────────────────────────────────
 
 /// A whole Resonate server, in this process, with one worker on it. The
-/// returned sender owns the background loops: dropping it stops them, so a
-/// test holds it for as long as it holds the server.
-fn harness() -> (Arc<Server>, tokio::sync::watch::Sender<bool>) {
+/// returned sender owns the timeout sweep: dropping it stops it, so a test
+/// holds it for as long as it holds the server.
+async fn harness() -> (Arc<Server>, tokio::sync::watch::Sender<bool>) {
     let mut config = ServerConfig::default();
     // Nothing else is enabled: this plugin is the only way out of the server.
     config.transports.http_push.enabled = false;
     config.transports.http_poll.enabled = false;
     let lease_timeout = config.tasks.lease_timeout;
-    let retry_timeout = config.tasks.retry_timeout;
 
-    let storage = Storage::Sqlite(
-        SqliteStorage::open(":memory:", retry_timeout).expect("in-memory store"),
+    let engine: Arc<dyn ResonateEngine> = Arc::new(
+        SqliteEngine::open(
+            ":memory:",
+            config.tasks.retry_timeout,
+            config.storage.sqlite.preload_limit,
+            true,
+            config.debug,
+        )
+        .expect("in-memory store"),
     );
-    let state = Arc::new(Server::new(config, None, storage));
 
     // The worker holds the server port directly — the same `process` path a
-    // remote worker's HTTP calls take.
-    let port: Arc<dyn ResonateServer> = state.clone();
+    // remote worker's HTTP calls take. The ring is server → router → worker →
+    // server, and it is closed after construction through `LatePort`: the
+    // server owns the router that owns the worker, so the worker's handle
+    // cannot be handed out until the server exists.
+    let port = Arc::new(LatePort::default());
     let mut workers: HashMap<String, Arc<dyn ResonateWorker>> = HashMap::new();
     workers.insert(
         SCHEME.to_string(),
-        Arc::new(Worker::new(port, plugin_config(), lease_timeout)),
+        Arc::new(Worker::new(
+            Arc::clone(&port) as Arc<dyn ResonateServer>,
+            plugin_config(),
+            lease_timeout,
+        )),
     );
     let router: Arc<dyn ResonateRouter> = Arc::new(TransportDispatcher::new(workers));
+
+    // The timer's callbacks point back at the server, so it is built from the
+    // weak handle `new_cyclic` hands out.
+    let state = Arc::new_cyclic(|weak: &std::sync::Weak<Server>| {
+        let timer = deadlines::build(&config.timeouts, weak.clone());
+        Server::new(config, engine, router, timer)
+    });
+    port.set(Arc::clone(&state) as Arc<dyn ResonateServer>);
+
+    state.router().init(false).await.expect("the worker starts");
+    state.start_timer().await;
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     tokio::spawn(processing_timeouts::timeout_processing_loop(
         state.clone(),
-        shutdown_rx.clone(),
-    ));
-    tokio::spawn(processing_messages::message_processing_loop(
-        state.clone(),
-        router,
         shutdown_rx,
     ));
     (state, shutdown_tx)
+}
+
+/// The server port the worker is built with, filled in once the server it
+/// points at exists.
+#[derive(Default)]
+struct LatePort(std::sync::OnceLock<Arc<dyn ResonateServer>>);
+
+impl LatePort {
+    fn set(&self, server: Arc<dyn ResonateServer>) {
+        let _ = self.0.set(server);
+    }
+}
+
+#[async_trait::async_trait]
+impl ResonateServer for LatePort {
+    async fn process(&self, req: &RequestEnvelope) -> Result<ResponseEnvelope, Unavailable> {
+        self.0
+            .get()
+            .expect("the port is filled in before anything routes")
+            .process(req)
+            .await
+    }
 }
 
 /// §2, from the environment §5.2 exports, with `poll` at 1s.
@@ -116,6 +175,8 @@ fn plugin_config() -> Config {
         email: env("BASEROW_EMAIL"),
         password: env("BASEROW_PASSWORD"),
         poll: Duration::from_secs(1),
+        poll_export: None,
+        poll_table: None,
     }
 }
 
@@ -179,14 +240,16 @@ fn head() -> RequestHead {
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
-/// The table §5.2 seeds: the export finishes.
-fn fixture_ok() -> i64 {
+/// `Tasks`: all text, so every write it is given succeeds.
+fn ok_table() -> i64 {
     env("BASEROW_FIXTURE_OK").parse().expect("BASEROW_FIXTURE_OK is an integer")
 }
 
-/// The table §5.2 trashes: the export is rejected at create time.
-fn fixture_fail() -> i64 {
-    env("BASEROW_FIXTURE_FAIL").parse().expect("BASEROW_FIXTURE_FAIL is an integer")
+/// `Amounts`: `Amount` is a number field, so a non-numeric value fails.
+fn fail_table() -> i64 {
+    env("BASEROW_FIXTURE_FAIL")
+        .parse()
+        .expect("BASEROW_FIXTURE_FAIL is an integer")
 }
 
 fn env(key: &str) -> String {
@@ -201,13 +264,13 @@ fn promise_id(what: &str) -> String {
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .expect("the clock is after the epoch")
         .as_millis() as i64
 }
 
 fn nanos() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .expect("the clock is after the epoch")
         .as_nanos()
 }

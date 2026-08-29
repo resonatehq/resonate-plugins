@@ -1,2 +1,8 @@
+# The tests run against the Baserow the specification's §5 provisions: one
+# container holding the API, the database and the single celery worker that
+# runs every export and file_import job. Concurrent tests would queue their
+# jobs behind one another and, worse, share the account whose export jobs
+# each new export cancels. The tests are therefore serial — the provider is
+# the shared fixture, not the test binary.
 [env]
 RUST_TEST_THREADS = "1"

@@ -17,6 +17,8 @@ serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
 
 [dev-dependencies]
-# The in-process Resonate server the end-to-end test compiles the worker into.
+# The in-process Resonate server the end-to-end test compiles the worker into,
+# and the storage engine its `Server::new` takes.
 resonate = { git = "https://github.com/resonatehq/resonate", branch = "core-crate" }
+resonate-server-dbms = { git = "https://github.com/resonatehq/resonate", branch = "core-crate", default-features = false, features = ["sqlite"] }
 tokio = { version = "1", features = ["rt-multi-thread", "time", "macros", "sync"] }

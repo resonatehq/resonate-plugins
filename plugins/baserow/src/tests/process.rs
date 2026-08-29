@@ -2,21 +2,35 @@
 //!
 //! Bring the provider up with specification §5.1/§5.2 first; the exported
 //! `BASEROW_BASE_URL`, `BASEROW_EMAIL`, `BASEROW_PASSWORD`,
-//! `BASEROW_FIXTURE_OK` and `BASEROW_FIXTURE_FAIL` are what [`config`] and the
-//! fixtures below read. Every documented condition is induced with real
-//! inputs against that instance — a real table is exported, a trashed table is
-//! really unresolvable, a corrupted credential is really rejected.
+//! `BASEROW_FIXTURE_OK` and `BASEROW_FIXTURE_FAIL` are what [`config`] and
+//! the fixtures below read. Every documented condition is induced with real
+//! inputs against that instance — a missing table is really missing, a
+//! corrupted credential is really rejected, an export job really runs on the
+//! celery worker and takes real time to finish.
 //!
-//! Three documented conditions of `export.create` have no live induction and
-//! so have no test here:
+//! §5 provisions two tables. `Tasks` (`BASEROW_FIXTURE_OK`) is all text, so
+//! every value it is given imports and every export of it finishes: it is
+//! the succeeding work item. `Amounts` (`BASEROW_FIXTURE_FAIL`) has a number
+//! field `Amount`, so a non-numeric value written to it is rejected by the
+//! field — synchronously as `ERROR_REQUEST_BODY_VALIDATION` on a row write,
+//! and asynchronously as a `report.failing_rows` entry on an import job that
+//! still reaches "finished". It is the failing work item.
 //!
-//!   * `export_failed` — §5.2: "Baserow documents no feature that drives an
-//!     export job to state 'failed', so export_failed has no fixture".
-//!   * `expired` — §5.2: it "occurs only 60 minutes after creation", and
-//!     EXPORT_FILE_EXPIRE_MINUTES is not settable through §5.1's image.
-//!   * `job_not_found` — the job record would have to disappear between two
-//!     polls, and Baserow's API exposes no endpoint that deletes an export
-//!     job (the table's own deletion only nulls `ExportJob.table`).
+//! Three rejection codes the specification constructs have no induction on
+//! this fixture, and no test below claims one:
+//!
+//!   * `already_deleted` (§4.5, §4.9) — Baserow's row lookup excludes
+//!     trashed rows, so deleting an already-deleted row answers 404
+//!     `ERROR_ROW_DOES_NOT_EXIST`, which is what §4.5.1 itself documents for
+//!     a re-delivery. `row_delete_rejects_row_not_found_on_re_entry` covers
+//!     that path.
+//!   * `field_not_found` (§4.1) — every field a row.list query can name
+//!     wrongly answers 400 (`ERROR_ORDER_BY_FIELD_NOT_FOUND`,
+//!     `ERROR_FILTER_FIELD_NOT_FOUND`), which is `invalid_request`.
+//!   * `cancelled`, `expired`, `export_failed`, `job_not_found` (§4.10) and
+//!     `cancelled`, `import_failed` (§4.12) — a csv export of a two-row text
+//!     table cannot fail and finishes in well under a second, no endpoint
+//!     deletes an export job, and `expired` is 60 minutes away.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -31,171 +45,97 @@ use resonate_plugin_baserow::plugin::{self, Config};
 /// is an implementation detail.
 type Verdict = Result<Result<String, String>, Result<String, String>>;
 
-// ─── export.create (§4.1) ─────────────────────────────────────────────────────
+/// A table id no table has.
+const NO_TABLE: i64 = 99_999;
+/// A row id no row has.
+const NO_ROW: i64 = 99_999;
+/// A view id no view has.
+const NO_VIEW: i64 = 99_999;
+/// A job id no job has.
+const NO_JOB: i64 = 99_999;
+/// A database id no application has.
+const NO_DATABASE: i64 = 99_999;
 
-/// resolved — the succeeding work item §5 provisions. Also the
-/// pending → terminal path: the create response is `state: "pending"` with a
-/// null `url`, so a resolved value carrying `state: "finished"` and a real
-/// `url` is proof the poll loop watched the job to its terminal state rather
-/// than reporting the creation.
+// ─── row.list (§4.1) ──────────────────────────────────────────────────────────
+
+/// resolved — = response.body, one page of the table's rows.
 #[tokio::test]
-async fn export_create_resolves_when_the_export_finishes() {
+async fn row_list_resolves_with_the_page() {
     let p = promise(
-        &promise_id("export-create-ok"),
-        "export.create",
-        json!({"table_id": fixture_ok(), "exporter_type": "csv"}),
-        in_ms(120_000),
+        &promise_id("row-list"),
+        "row.list",
+        json!({"table_id": ok_table(), "size": 200, "user_field_names": true}),
+        in_ms(60_000),
     );
 
     let value = resolved(plugin::process(&config(), &p).await);
 
-    assert!(value["id"].is_i64(), "{value}");
-    assert_eq!(value["table"], fixture_ok());
-    assert_eq!(value["view"], Value::Null);
-    assert_eq!(value["exporter_type"], "csv");
-    assert_eq!(value["state"], "finished");
-    let file = value["exported_file_name"].as_str().expect("exported_file_name");
-    assert!(file.ends_with(".csv"), "{value}");
-    assert!(value["created_at"].is_string(), "{value}");
-    let url = value["url"].as_str().expect("url is a string once finished");
-    assert!(url.contains(file), "{value}");
-    // The Resolved schema is exactly these eight keys.
-    assert_eq!(value.as_object().unwrap().len(), 8, "{value}");
+    assert!(value["count"].is_number(), "{value}");
+    assert_eq!(value["previous"], Value::Null);
+    let results = value["results"].as_array().expect("results is an array");
+    assert!(!results.is_empty(), "{value}");
+    assert!(results[0]["id"].is_i64(), "{value}");
+    assert!(results[0]["order"].is_string(), "{value}");
+    // user_field_names: the keys are the field names §5 gave the table.
+    assert!(results[0].get("Name").is_some(), "{value}");
 }
 
-/// `table_not_found` — the trashed table §5.2 provisions. TableHandler
-/// excludes trashed tables, so the id is permanently unresolvable.
+/// `table_not_found` — a nonexistent table id.
 #[tokio::test]
-async fn export_create_rejects_table_not_found() {
+async fn row_list_rejects_table_not_found() {
     let p = promise(
-        &promise_id("export-create-notable"),
-        "export.create",
-        json!({"table_id": fixture_fail(), "exporter_type": "csv"}),
+        &promise_id("row-list-notable"),
+        "row.list",
+        json!({"table_id": NO_TABLE}),
         in_ms(60_000),
     );
 
     let value = rejected(plugin::process(&config(), &p).await);
 
     assert_eq!(value["code"], "table_not_found");
-    // detail = response.body of the 404 ({error, detail}).
-    assert_eq!(value["detail"]["error"], "ERROR_TABLE_DOES_NOT_EXIST");
-    assert!(value["detail"]["detail"].is_string(), "{value}");
+    // detail = response.body.detail of the 404.
+    assert!(value["detail"].is_string(), "{value}");
 }
 
-/// `view_not_found` — a view id no view has.
+/// `view_not_found` — a nonexistent view id.
 #[tokio::test]
-async fn export_create_rejects_view_not_found() {
+async fn row_list_rejects_view_not_found() {
     let p = promise(
-        &promise_id("export-create-noview"),
-        "export.create",
-        json!({"table_id": fixture_ok(), "exporter_type": "csv", "view_id": 999_999}),
+        &promise_id("row-list-noview"),
+        "row.list",
+        json!({"table_id": ok_table(), "view_id": NO_VIEW}),
         in_ms(60_000),
     );
 
     let value = rejected(plugin::process(&config(), &p).await);
 
     assert_eq!(value["code"], "view_not_found");
-    assert_eq!(value["detail"]["error"], "ERROR_VIEW_DOES_NOT_EXIST");
+    assert!(value["detail"].is_string(), "{value}");
 }
 
-/// `invalid_request` — `exporter_type` is documented as an enum, and an
-/// unregistered exporter is one of the validation failures the Param schema
-/// names.
+/// `invalid_request` — the Param schema caps `size` at 200.
 #[tokio::test]
-async fn export_create_rejects_invalid_request() {
+async fn row_list_rejects_invalid_request() {
     let p = promise(
-        &promise_id("export-create-bad"),
-        "export.create",
-        json!({"table_id": fixture_ok(), "exporter_type": "no_such_exporter"}),
+        &promise_id("row-list-bad"),
+        "row.list",
+        json!({"table_id": ok_table(), "size": 201}),
         in_ms(60_000),
     );
 
     let value = rejected(plugin::process(&config(), &p).await);
 
     assert_eq!(value["code"], "invalid_request");
-    // detail = response.body of the 400 ({error, detail}).
-    assert_eq!(value["detail"]["error"], "ERROR_REQUEST_BODY_VALIDATION");
-    assert!(!value["detail"]["detail"]["exporter_type"].is_null(), "{value}");
-}
-
-/// `cancelled` — creating an export job sets every other unfinished export job
-/// of the same user to `cancelled`, so a second export started while this one
-/// is still running is the whole induction. Two details of the §5 provider's
-/// own export task — observed while building this test, and no part of the
-/// specification — decide when that second export has to land: the task writes
-/// `state: "exporting"` over whatever the row held when it starts, so a
-/// cancellation that arrives while the job is still `pending` is lost, and it
-/// re-reads the row before writing the last row, so one that arrives while the
-/// job is `exporting` is honoured. That window is the export's own duration —
-/// milliseconds on the two-row fixture table — so this test exports a table
-/// large enough to be worth cancelling and watches for `exporting` at a
-/// cadence far below it. Export job ids are sequential and the tests run
-/// serially, so the job the plugin is about to create is the one after this
-/// test's own.
-#[tokio::test]
-async fn export_create_rejects_cancelled() {
-    let table = big_table().await;
-    let target = create_export_job(fixture_ok()).await + 1;
-    let p = promise(
-        &promise_id("export-create-cancelled"),
-        "export.create",
-        json!({"table_id": table, "exporter_type": "csv"}),
-        in_ms(60_000),
-    );
-
-    let canceller = async {
-        for _ in 0..2_000 {
-            match export_job_state(target).await {
-                // The plugin has not created its job yet, or its job is
-                // queued and a cancellation now would be overwritten.
-                None | Some(Pending) => {}
-                // Running: a second export of any table cancels this one.
-                Some(Exporting) => {
-                    create_export_job(fixture_ok()).await;
-                }
-                // Terminal: either this loop already cancelled it, or the
-                // export won the race and the assertions below say so.
-                Some(Terminal) => break,
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    };
-    let config = config();
-    let (verdict, ()) = tokio::join!(plugin::process(&config, &p), canceller);
-    let value = rejected(verdict);
-
-    assert_eq!(value["code"], "cancelled");
-    // detail = the terminal export job object.
-    assert_eq!(value["detail"]["id"], target);
-    assert_eq!(value["detail"]["state"], "cancelled");
-    assert_eq!(value["detail"]["table"], table);
-}
-
-/// The deadline — `timeout_at` already in the past. No verdict: the server
-/// settles a timed-out promise itself. The export job the create call made
-/// is left running; nothing on it ties it to this promise, which is what the
-/// specification's comment in the poll loop records.
-#[tokio::test]
-async fn export_create_releases_at_the_deadline() {
-    let p = promise(
-        &promise_id("export-create-deadline"),
-        "export.create",
-        json!({"table_id": fixture_ok(), "exporter_type": "csv"}),
-        in_ms(-1_000),
-    );
-
-    let reason = released(plugin::process(&config(), &p).await);
-
-    assert_eq!(reason, "promise timed out");
+    assert!(!value["detail"].is_null(), "{value}");
 }
 
 /// halt — the credential is rejected, and no retry of ours can fix that.
 #[tokio::test]
-async fn export_create_halts_on_rejected_credentials() {
+async fn row_list_halts_on_rejected_credentials() {
     let p = promise(
-        &promise_id("export-create-halt"),
-        "export.create",
-        json!({"table_id": fixture_ok(), "exporter_type": "csv"}),
+        &promise_id("row-list-halt"),
+        "row.list",
+        json!({"table_id": ok_table()}),
         in_ms(60_000),
     );
 
@@ -204,34 +144,1082 @@ async fn export_create_halts_on_rejected_credentials() {
     assert!(reason.contains("ERROR_INVALID_CREDENTIALS"), "{reason}");
 }
 
-/// Re-entry — Baserow has no idempotency: nothing on an export job carries a
-/// client-supplied identity, so a redelivery cannot re-attach and exports the
-/// table a second time under a second job id. Both attempts still reach the
-/// same verdict, which is what makes the redelivery safe.
+// ─── row.get (§4.2) ───────────────────────────────────────────────────────────
+
+/// resolved — = response.body, the row.
 #[tokio::test]
-async fn export_create_exports_again_on_re_entry() {
+async fn row_get_resolves_with_the_row() {
+    let row_id = seed_row("row-get").await;
     let p = promise(
-        &promise_id("export-create-reentry"),
-        "export.create",
-        json!({"table_id": fixture_ok(), "exporter_type": "csv"}),
-        in_ms(120_000),
+        &promise_id("row-get"),
+        "row.get",
+        json!({"table_id": ok_table(), "row_id": row_id, "user_field_names": true}),
+        in_ms(60_000),
+    );
+
+    let value = resolved(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["id"], row_id);
+    assert!(value["order"].is_string(), "{value}");
+    assert_eq!(value["Name"], "row-get");
+}
+
+/// `table_not_found` — a nonexistent table id.
+#[tokio::test]
+async fn row_get_rejects_table_not_found() {
+    let p = promise(
+        &promise_id("row-get-notable"),
+        "row.get",
+        json!({"table_id": NO_TABLE, "row_id": 1}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "table_not_found");
+    assert!(value["detail"].is_string(), "{value}");
+}
+
+/// `row_not_found` — a nonexistent row id.
+#[tokio::test]
+async fn row_get_rejects_row_not_found() {
+    let p = promise(
+        &promise_id("row-get-norow"),
+        "row.get",
+        json!({"table_id": ok_table(), "row_id": NO_ROW}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "row_not_found");
+    assert!(value["detail"].is_string(), "{value}");
+}
+
+/// `view_not_found` — a nonexistent view id.
+#[tokio::test]
+async fn row_get_rejects_view_not_found() {
+    let row_id = seed_row("row-get-noview").await;
+    let p = promise(
+        &promise_id("row-get-noview"),
+        "row.get",
+        json!({"table_id": ok_table(), "row_id": row_id, "view": NO_VIEW}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "view_not_found");
+    assert!(value["detail"].is_string(), "{value}");
+}
+
+/// `invalid_request` — `row_id` is required by the Param schema.
+#[tokio::test]
+async fn row_get_rejects_invalid_request() {
+    let p = promise(
+        &promise_id("row-get-bad"),
+        "row.get",
+        json!({"table_id": ok_table()}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "invalid_request");
+    assert!(
+        value["detail"].as_str().unwrap_or_default().contains("row_id"),
+        "{value}"
+    );
+}
+
+/// halt — the credential is rejected.
+#[tokio::test]
+async fn row_get_halts_on_rejected_credentials() {
+    let p = promise(
+        &promise_id("row-get-halt"),
+        "row.get",
+        json!({"table_id": ok_table(), "row_id": 1}),
+        in_ms(60_000),
+    );
+
+    let reason = halted(plugin::process(&bad_credential(), &p).await);
+
+    assert!(reason.contains("ERROR_INVALID_CREDENTIALS"), "{reason}");
+}
+
+// ─── row.create (§4.3) ────────────────────────────────────────────────────────
+
+/// resolved — = response.body, the created row.
+#[tokio::test]
+async fn row_create_resolves_with_the_created_row() {
+    let p = promise(
+        &promise_id("row-create"),
+        "row.create",
+        json!({
+            "table_id": ok_table(),
+            "values": {"Name": "created", "Notes": "by row.create"},
+            "user_field_names": true,
+        }),
+        in_ms(60_000),
+    );
+
+    let value = resolved(plugin::process(&config(), &p).await);
+
+    assert!(value["id"].is_i64(), "{value}");
+    assert!(value["order"].is_string(), "{value}");
+    assert_eq!(value["Name"], "created");
+    assert_eq!(value["Notes"], "by row.create");
+}
+
+/// `table_not_found` — a nonexistent table id.
+#[tokio::test]
+async fn row_create_rejects_table_not_found() {
+    let p = promise(
+        &promise_id("row-create-notable"),
+        "row.create",
+        json!({"table_id": NO_TABLE, "values": {}}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "table_not_found");
+    assert!(value["detail"].is_string(), "{value}");
+}
+
+/// `row_not_found` — the `before` row does not exist.
+#[tokio::test]
+async fn row_create_rejects_row_not_found() {
+    let p = promise(
+        &promise_id("row-create-norow"),
+        "row.create",
+        json!({"table_id": ok_table(), "values": {}, "before": NO_ROW}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "row_not_found");
+    assert!(value["detail"].is_string(), "{value}");
+}
+
+/// `view_not_found` — a nonexistent view id.
+#[tokio::test]
+async fn row_create_rejects_view_not_found() {
+    let p = promise(
+        &promise_id("row-create-noview"),
+        "row.create",
+        json!({"table_id": ok_table(), "values": {}, "view": NO_VIEW}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "view_not_found");
+    assert!(value["detail"].is_string(), "{value}");
+}
+
+/// `invalid_request` — the failing work item: `Amount` is a number field and
+/// a non-numeric value is not accepted by it.
+#[tokio::test]
+async fn row_create_rejects_invalid_request() {
+    let p = promise(
+        &promise_id("row-create-bad"),
+        "row.create",
+        json!({
+            "table_id": fail_table(),
+            "values": {"Label": "bad", "Amount": "not-a-number"},
+            "user_field_names": true,
+        }),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "invalid_request");
+    // §4.3.2: for ERROR_REQUEST_BODY_VALIDATION an object keyed by field name.
+    assert!(value["detail"]["Amount"].is_array(), "{value}");
+}
+
+/// halt — the credential is rejected.
+#[tokio::test]
+async fn row_create_halts_on_rejected_credentials() {
+    let p = promise(
+        &promise_id("row-create-halt"),
+        "row.create",
+        json!({"table_id": ok_table(), "values": {}}),
+        in_ms(60_000),
+    );
+
+    let reason = halted(plugin::process(&bad_credential(), &p).await);
+
+    assert!(reason.contains("ERROR_INVALID_CREDENTIALS"), "{reason}");
+}
+
+// ─── row.update (§4.4) ────────────────────────────────────────────────────────
+
+/// resolved — = response.body, the updated row.
+#[tokio::test]
+async fn row_update_resolves_with_the_updated_row() {
+    let row_id = seed_row("row-update").await;
+    let p = promise(
+        &promise_id("row-update"),
+        "row.update",
+        json!({
+            "table_id": ok_table(),
+            "row_id": row_id,
+            "values": {"Notes": "updated"},
+            "user_field_names": true,
+        }),
+        in_ms(60_000),
+    );
+
+    let value = resolved(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["id"], row_id);
+    assert_eq!(value["Name"], "row-update");
+    assert_eq!(value["Notes"], "updated");
+}
+
+/// Re-entry — the write is a function of the promise, so a second delivery
+/// re-applies the same values and leaves the same row state.
+#[tokio::test]
+async fn row_update_is_unchanged_on_re_entry() {
+    let row_id = seed_row("row-update-reentry").await;
+    let p = promise(
+        &promise_id("row-update-reentry"),
+        "row.update",
+        json!({
+            "table_id": ok_table(),
+            "row_id": row_id,
+            "values": {"Notes": "idempotent"},
+            "user_field_names": true,
+        }),
+        in_ms(60_000),
     );
 
     let first = resolved(plugin::process(&config(), &p).await);
     let second = resolved(plugin::process(&config(), &p).await);
 
-    assert_eq!(first["state"], "finished");
-    assert_eq!(second["state"], "finished");
-    assert_ne!(first["id"], second["id"], "one promise, two export jobs");
+    assert_eq!(first, second);
+    assert_eq!(second["Notes"], "idempotent");
 }
 
-// ─── export.get (§4.2) ────────────────────────────────────────────────────────
+/// `table_not_found` — a nonexistent table id.
+#[tokio::test]
+async fn row_update_rejects_table_not_found() {
+    let p = promise(
+        &promise_id("row-update-notable"),
+        "row.update",
+        json!({"table_id": NO_TABLE, "row_id": 1, "values": {}}),
+        in_ms(60_000),
+    );
 
-/// resolved — = response.body. The job is provisioned with a raw call, so
-/// this read does not depend on `export.create`.
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "table_not_found");
+    assert!(value["detail"].is_string(), "{value}");
+}
+
+/// `row_not_found` — a nonexistent row id.
+#[tokio::test]
+async fn row_update_rejects_row_not_found() {
+    let p = promise(
+        &promise_id("row-update-norow"),
+        "row.update",
+        json!({"table_id": ok_table(), "row_id": NO_ROW, "values": {}}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "row_not_found");
+    assert!(value["detail"].is_string(), "{value}");
+}
+
+/// `view_not_found` — a nonexistent view id.
+#[tokio::test]
+async fn row_update_rejects_view_not_found() {
+    let row_id = seed_row("row-update-noview").await;
+    let p = promise(
+        &promise_id("row-update-noview"),
+        "row.update",
+        json!({"table_id": ok_table(), "row_id": row_id, "values": {}, "view": NO_VIEW}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "view_not_found");
+    assert!(value["detail"].is_string(), "{value}");
+}
+
+/// `invalid_request` — the failing work item's number field.
+#[tokio::test]
+async fn row_update_rejects_invalid_request() {
+    let row_id = seed_fail_row("row-update-bad").await;
+    let p = promise(
+        &promise_id("row-update-bad"),
+        "row.update",
+        json!({
+            "table_id": fail_table(),
+            "row_id": row_id,
+            "values": {"Amount": "not-a-number"},
+            "user_field_names": true,
+        }),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "invalid_request");
+    assert!(value["detail"]["Amount"].is_array(), "{value}");
+}
+
+/// halt — the credential is rejected.
+#[tokio::test]
+async fn row_update_halts_on_rejected_credentials() {
+    let p = promise(
+        &promise_id("row-update-halt"),
+        "row.update",
+        json!({"table_id": ok_table(), "row_id": 1, "values": {}}),
+        in_ms(60_000),
+    );
+
+    let reason = halted(plugin::process(&bad_credential(), &p).await);
+
+    assert!(reason.contains("ERROR_INVALID_CREDENTIALS"), "{reason}");
+}
+
+// ─── row.delete (§4.5) ────────────────────────────────────────────────────────
+
+/// resolved — the endpoint answers 204, so the Resolved value is empty.
+#[tokio::test]
+async fn row_delete_resolves_with_an_empty_object() {
+    let row_id = seed_row("row-delete").await;
+    let p = promise(
+        &promise_id("row-delete"),
+        "row.delete",
+        json!({"table_id": ok_table(), "row_id": row_id}),
+        in_ms(60_000),
+    );
+
+    let value = resolved(plugin::process(&config(), &p).await);
+
+    assert_eq!(value, json!({}));
+    assert_eq!(row_status(ok_table(), row_id).await, 404, "the row survived");
+}
+
+/// Re-entry — §4.5.1: a re-delivery after an earlier attempt already deleted
+/// the row rejects `row_not_found`. (Baserow's row lookup excludes trashed
+/// rows, so `already_deleted` is not the answer here.)
+#[tokio::test]
+async fn row_delete_rejects_row_not_found_on_re_entry() {
+    let row_id = seed_row("row-delete-reentry").await;
+    let p = promise(
+        &promise_id("row-delete-reentry"),
+        "row.delete",
+        json!({"table_id": ok_table(), "row_id": row_id}),
+        in_ms(60_000),
+    );
+
+    assert_eq!(resolved(plugin::process(&config(), &p).await), json!({}));
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "row_not_found");
+    assert!(value["detail"].is_string(), "{value}");
+}
+
+/// `table_not_found` — a nonexistent table id.
+#[tokio::test]
+async fn row_delete_rejects_table_not_found() {
+    let p = promise(
+        &promise_id("row-delete-notable"),
+        "row.delete",
+        json!({"table_id": NO_TABLE, "row_id": 1}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "table_not_found");
+    assert!(value["detail"].is_string(), "{value}");
+}
+
+/// `row_not_found` — a nonexistent row id.
+#[tokio::test]
+async fn row_delete_rejects_row_not_found() {
+    let p = promise(
+        &promise_id("row-delete-norow"),
+        "row.delete",
+        json!({"table_id": ok_table(), "row_id": NO_ROW}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "row_not_found");
+    assert!(value["detail"].is_string(), "{value}");
+}
+
+/// `view_not_found` — a nonexistent view id.
+#[tokio::test]
+async fn row_delete_rejects_view_not_found() {
+    let row_id = seed_row("row-delete-noview").await;
+    let p = promise(
+        &promise_id("row-delete-noview"),
+        "row.delete",
+        json!({"table_id": ok_table(), "row_id": row_id, "view": NO_VIEW}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "view_not_found");
+    assert!(value["detail"].is_string(), "{value}");
+}
+
+/// `invalid_request` — `table_id` is required by the Param schema.
+#[tokio::test]
+async fn row_delete_rejects_invalid_request() {
+    let p = promise(
+        &promise_id("row-delete-bad"),
+        "row.delete",
+        json!({"row_id": 1}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "invalid_request");
+    assert!(
+        value["detail"].as_str().unwrap_or_default().contains("table_id"),
+        "{value}"
+    );
+}
+
+/// halt — the credential is rejected.
+#[tokio::test]
+async fn row_delete_halts_on_rejected_credentials() {
+    let p = promise(
+        &promise_id("row-delete-halt"),
+        "row.delete",
+        json!({"table_id": ok_table(), "row_id": 1}),
+        in_ms(60_000),
+    );
+
+    let reason = halted(plugin::process(&bad_credential(), &p).await);
+
+    assert!(reason.contains("ERROR_INVALID_CREDENTIALS"), "{reason}");
+}
+
+// ─── row.move (§4.6) ──────────────────────────────────────────────────────────
+
+/// resolved — = response.body, the moved row.
+#[tokio::test]
+async fn row_move_resolves_with_the_moved_row() {
+    let first = seed_row("row-move-first").await;
+    let second = seed_row("row-move-second").await;
+    let p = promise(
+        &promise_id("row-move"),
+        "row.move",
+        json!({
+            "table_id": ok_table(),
+            "row_id": second,
+            "before_id": first,
+            "user_field_names": true,
+        }),
+        in_ms(60_000),
+    );
+
+    let value = resolved(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["id"], second);
+    assert_eq!(value["Name"], "row-move-second");
+    assert!(value["order"].is_string(), "{value}");
+}
+
+/// `table_not_found` — a nonexistent table id.
+#[tokio::test]
+async fn row_move_rejects_table_not_found() {
+    let p = promise(
+        &promise_id("row-move-notable"),
+        "row.move",
+        json!({"table_id": NO_TABLE, "row_id": 1}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "table_not_found");
+    assert!(value["detail"].is_string(), "{value}");
+}
+
+/// `row_not_found` — the `before_id` row does not exist.
+#[tokio::test]
+async fn row_move_rejects_row_not_found() {
+    let row_id = seed_row("row-move-norow").await;
+    let p = promise(
+        &promise_id("row-move-norow"),
+        "row.move",
+        json!({"table_id": ok_table(), "row_id": row_id, "before_id": NO_ROW}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "row_not_found");
+    assert!(value["detail"].is_string(), "{value}");
+}
+
+/// `view_not_found` — a nonexistent view id.
+#[tokio::test]
+async fn row_move_rejects_view_not_found() {
+    let row_id = seed_row("row-move-noview").await;
+    let p = promise(
+        &promise_id("row-move-noview"),
+        "row.move",
+        json!({"table_id": ok_table(), "row_id": row_id, "view": NO_VIEW}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "view_not_found");
+    assert!(value["detail"].is_string(), "{value}");
+}
+
+/// `invalid_request` — `row_id` is required by the Param schema.
+#[tokio::test]
+async fn row_move_rejects_invalid_request() {
+    let p = promise(
+        &promise_id("row-move-bad"),
+        "row.move",
+        json!({"table_id": ok_table()}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "invalid_request");
+    assert!(
+        value["detail"].as_str().unwrap_or_default().contains("row_id"),
+        "{value}"
+    );
+}
+
+/// halt — the credential is rejected.
+#[tokio::test]
+async fn row_move_halts_on_rejected_credentials() {
+    let p = promise(
+        &promise_id("row-move-halt"),
+        "row.move",
+        json!({"table_id": ok_table(), "row_id": 1}),
+        in_ms(60_000),
+    );
+
+    let reason = halted(plugin::process(&bad_credential(), &p).await);
+
+    assert!(reason.contains("ERROR_INVALID_CREDENTIALS"), "{reason}");
+}
+
+// ─── rows.create (§4.7) ───────────────────────────────────────────────────────
+
+/// resolved — = response.body, the created rows under `items`.
+#[tokio::test]
+async fn rows_create_resolves_with_the_created_rows() {
+    let p = promise(
+        &promise_id("rows-create"),
+        "rows.create",
+        json!({
+            "table_id": ok_table(),
+            "rows": [{"Name": "batch-a"}, {"Name": "batch-b"}],
+            "user_field_names": true,
+        }),
+        in_ms(60_000),
+    );
+
+    let value = resolved(plugin::process(&config(), &p).await);
+
+    let items = value["items"].as_array().expect("items is an array");
+    assert_eq!(items.len(), 2, "{value}");
+    assert_eq!(items[0]["Name"], "batch-a");
+    assert_eq!(items[1]["Name"], "batch-b");
+    assert!(items[0]["id"].is_i64(), "{value}");
+}
+
+/// `table_not_found` — a nonexistent table id.
+#[tokio::test]
+async fn rows_create_rejects_table_not_found() {
+    let p = promise(
+        &promise_id("rows-create-notable"),
+        "rows.create",
+        json!({"table_id": NO_TABLE, "rows": [{}]}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "table_not_found");
+    assert!(value["detail"].is_string(), "{value}");
+}
+
+/// `row_not_found` — the `before` row does not exist.
+#[tokio::test]
+async fn rows_create_rejects_row_not_found() {
+    let p = promise(
+        &promise_id("rows-create-norow"),
+        "rows.create",
+        json!({"table_id": ok_table(), "rows": [{}], "before": NO_ROW}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "row_not_found");
+    assert!(value["detail"].is_string(), "{value}");
+}
+
+/// `view_not_found` — a nonexistent view id.
+#[tokio::test]
+async fn rows_create_rejects_view_not_found() {
+    let p = promise(
+        &promise_id("rows-create-noview"),
+        "rows.create",
+        json!({"table_id": ok_table(), "rows": [{}], "view": NO_VIEW}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "view_not_found");
+    assert!(value["detail"].is_string(), "{value}");
+}
+
+/// `invalid_request` — the failing work item's number field.
+#[tokio::test]
+async fn rows_create_rejects_invalid_request() {
+    let p = promise(
+        &promise_id("rows-create-bad"),
+        "rows.create",
+        json!({
+            "table_id": fail_table(),
+            "rows": [{"Amount": "not-a-number"}],
+            "user_field_names": true,
+        }),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "invalid_request");
+    assert!(!value["detail"].is_null(), "{value}");
+}
+
+/// halt — the credential is rejected.
+#[tokio::test]
+async fn rows_create_halts_on_rejected_credentials() {
+    let p = promise(
+        &promise_id("rows-create-halt"),
+        "rows.create",
+        json!({"table_id": ok_table(), "rows": [{}]}),
+        in_ms(60_000),
+    );
+
+    let reason = halted(plugin::process(&bad_credential(), &p).await);
+
+    assert!(reason.contains("ERROR_INVALID_CREDENTIALS"), "{reason}");
+}
+
+// ─── rows.update (§4.8) ───────────────────────────────────────────────────────
+
+/// resolved — = response.body, the updated rows under `items`.
+#[tokio::test]
+async fn rows_update_resolves_with_the_updated_rows() {
+    let a = seed_row("rows-update-a").await;
+    let b = seed_row("rows-update-b").await;
+    let p = promise(
+        &promise_id("rows-update"),
+        "rows.update",
+        json!({
+            "table_id": ok_table(),
+            "rows": [{"id": a, "Notes": "one"}, {"id": b, "Notes": "two"}],
+            "user_field_names": true,
+        }),
+        in_ms(60_000),
+    );
+
+    let value = resolved(plugin::process(&config(), &p).await);
+
+    let items = value["items"].as_array().expect("items is an array");
+    assert_eq!(items.len(), 2, "{value}");
+    assert_eq!(items[0]["id"], a);
+    assert_eq!(items[0]["Notes"], "one");
+    assert_eq!(items[1]["Notes"], "two");
+}
+
+/// `table_not_found` — a nonexistent table id.
+#[tokio::test]
+async fn rows_update_rejects_table_not_found() {
+    let p = promise(
+        &promise_id("rows-update-notable"),
+        "rows.update",
+        json!({"table_id": NO_TABLE, "rows": [{"id": 1}]}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "table_not_found");
+    assert!(value["detail"].is_string(), "{value}");
+}
+
+/// `row_not_found` — one item names a row that does not exist.
+#[tokio::test]
+async fn rows_update_rejects_row_not_found() {
+    let p = promise(
+        &promise_id("rows-update-norow"),
+        "rows.update",
+        json!({"table_id": ok_table(), "rows": [{"id": NO_ROW}]}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "row_not_found");
+    assert!(value["detail"].is_string(), "{value}");
+}
+
+/// `view_not_found` — a nonexistent view id.
+#[tokio::test]
+async fn rows_update_rejects_view_not_found() {
+    let row_id = seed_row("rows-update-noview").await;
+    let p = promise(
+        &promise_id("rows-update-noview"),
+        "rows.update",
+        json!({"table_id": ok_table(), "rows": [{"id": row_id}], "view": NO_VIEW}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "view_not_found");
+    assert!(value["detail"].is_string(), "{value}");
+}
+
+/// `row_ids_not_unique` — one row id appears twice.
+#[tokio::test]
+async fn rows_update_rejects_row_ids_not_unique() {
+    let row_id = seed_row("rows-update-dup").await;
+    let p = promise(
+        &promise_id("rows-update-dup"),
+        "rows.update",
+        json!({
+            "table_id": ok_table(),
+            "rows": [{"id": row_id}, {"id": row_id}],
+        }),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "row_ids_not_unique");
+    assert!(value["detail"].is_string(), "{value}");
+}
+
+/// `invalid_request` — the failing work item's number field.
+#[tokio::test]
+async fn rows_update_rejects_invalid_request() {
+    let row_id = seed_fail_row("rows-update-bad").await;
+    let p = promise(
+        &promise_id("rows-update-bad"),
+        "rows.update",
+        json!({
+            "table_id": fail_table(),
+            "rows": [{"id": row_id, "Amount": "not-a-number"}],
+            "user_field_names": true,
+        }),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "invalid_request");
+    assert!(!value["detail"].is_null(), "{value}");
+}
+
+/// halt — the credential is rejected.
+#[tokio::test]
+async fn rows_update_halts_on_rejected_credentials() {
+    let p = promise(
+        &promise_id("rows-update-halt"),
+        "rows.update",
+        json!({"table_id": ok_table(), "rows": [{"id": 1}]}),
+        in_ms(60_000),
+    );
+
+    let reason = halted(plugin::process(&bad_credential(), &p).await);
+
+    assert!(reason.contains("ERROR_INVALID_CREDENTIALS"), "{reason}");
+}
+
+// ─── rows.delete (§4.9) ───────────────────────────────────────────────────────
+
+/// resolved — the endpoint answers 204, so the Resolved value is empty.
+#[tokio::test]
+async fn rows_delete_resolves_with_an_empty_object() {
+    let a = seed_row("rows-delete-a").await;
+    let b = seed_row("rows-delete-b").await;
+    let p = promise(
+        &promise_id("rows-delete"),
+        "rows.delete",
+        json!({"table_id": ok_table(), "row_ids": [a, b]}),
+        in_ms(60_000),
+    );
+
+    let value = resolved(plugin::process(&config(), &p).await);
+
+    assert_eq!(value, json!({}));
+    assert_eq!(row_status(ok_table(), a).await, 404, "row {a} survived");
+    assert_eq!(row_status(ok_table(), b).await, 404, "row {b} survived");
+}
+
+/// `table_not_found` — a nonexistent table id.
+#[tokio::test]
+async fn rows_delete_rejects_table_not_found() {
+    let p = promise(
+        &promise_id("rows-delete-notable"),
+        "rows.delete",
+        json!({"table_id": NO_TABLE, "row_ids": [1]}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "table_not_found");
+    assert!(value["detail"].is_string(), "{value}");
+}
+
+/// `row_not_found` — one listed row does not exist. No row is deleted when
+/// any id in the list fails.
+#[tokio::test]
+async fn rows_delete_rejects_row_not_found() {
+    let row_id = seed_row("rows-delete-norow").await;
+    let p = promise(
+        &promise_id("rows-delete-norow"),
+        "rows.delete",
+        json!({"table_id": ok_table(), "row_ids": [row_id, NO_ROW]}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "row_not_found");
+    assert!(value["detail"].is_string(), "{value}");
+    assert_eq!(row_status(ok_table(), row_id).await, 200, "row {row_id} was deleted");
+}
+
+/// `view_not_found` — a nonexistent view id.
+#[tokio::test]
+async fn rows_delete_rejects_view_not_found() {
+    let row_id = seed_row("rows-delete-noview").await;
+    let p = promise(
+        &promise_id("rows-delete-noview"),
+        "rows.delete",
+        json!({"table_id": ok_table(), "row_ids": [row_id], "view": NO_VIEW}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "view_not_found");
+    assert!(value["detail"].is_string(), "{value}");
+}
+
+/// `row_ids_not_unique` — one row id appears twice.
+#[tokio::test]
+async fn rows_delete_rejects_row_ids_not_unique() {
+    let row_id = seed_row("rows-delete-dup").await;
+    let p = promise(
+        &promise_id("rows-delete-dup"),
+        "rows.delete",
+        json!({"table_id": ok_table(), "row_ids": [row_id, row_id]}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "row_ids_not_unique");
+    assert!(value["detail"].is_string(), "{value}");
+}
+
+/// `invalid_request` — `row_ids` is required by the Param schema.
+#[tokio::test]
+async fn rows_delete_rejects_invalid_request() {
+    let p = promise(
+        &promise_id("rows-delete-bad"),
+        "rows.delete",
+        json!({"table_id": ok_table()}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "invalid_request");
+    assert!(
+        value["detail"].as_str().unwrap_or_default().contains("row_ids"),
+        "{value}"
+    );
+}
+
+/// halt — the credential is rejected.
+#[tokio::test]
+async fn rows_delete_halts_on_rejected_credentials() {
+    let p = promise(
+        &promise_id("rows-delete-halt"),
+        "rows.delete",
+        json!({"table_id": ok_table(), "row_ids": [1]}),
+        in_ms(60_000),
+    );
+
+    let reason = halted(plugin::process(&bad_credential(), &p).await);
+
+    assert!(reason.contains("ERROR_INVALID_CREDENTIALS"), "{reason}");
+}
+
+// ─── export.create (§4.10) ────────────────────────────────────────────────────
+
+/// resolved — the succeeding work item, and the pending → terminal path: the
+/// create response is state "pending" with a null `url`, so a resolved value
+/// carrying state "finished", an `exported_file_name` and a `url` is proof
+/// the poll loop watched the job to its terminal state rather than reporting
+/// the create.
+#[tokio::test]
+async fn export_create_resolves_when_the_export_finishes() {
+    let p = promise(
+        &promise_id("export-create"),
+        "export.create",
+        json!({"table_id": ok_table(), "exporter_type": "csv"}),
+        in_ms(120_000),
+    );
+
+    let value = resolved(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["state"], "finished");
+    assert_eq!(value["exporter_type"], "csv");
+    assert_eq!(value["table"], ok_table());
+    assert_eq!(value["view"], Value::Null);
+    assert!(value["id"].is_i64(), "{value}");
+    assert!(value["exported_file_name"].is_string(), "{value}");
+    assert!(value["url"].is_string(), "{value}");
+    assert!(value["created_at"].is_string(), "{value}");
+    assert_eq!(value["progress_percentage"], json!(100.0));
+    // The Resolved schema is exactly these nine keys.
+    assert_eq!(value.as_object().expect("object").len(), 9, "{value}");
+}
+
+/// `table_not_found` — a nonexistent table id.
+#[tokio::test]
+async fn export_create_rejects_table_not_found() {
+    let p = promise(
+        &promise_id("export-notable"),
+        "export.create",
+        json!({"table_id": NO_TABLE, "exporter_type": "csv"}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "table_not_found");
+    assert!(value["detail"].is_string(), "{value}");
+}
+
+/// `view_not_found` — a nonexistent view id.
+#[tokio::test]
+async fn export_create_rejects_view_not_found() {
+    let p = promise(
+        &promise_id("export-noview"),
+        "export.create",
+        json!({"table_id": ok_table(), "exporter_type": "csv", "view_id": NO_VIEW}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "view_not_found");
+    assert!(value["detail"].is_string(), "{value}");
+}
+
+/// `invalid_request` — `exporter_type` is an enum in the Param schema.
+#[tokio::test]
+async fn export_create_rejects_invalid_request() {
+    let p = promise(
+        &promise_id("export-bad"),
+        "export.create",
+        json!({"table_id": ok_table(), "exporter_type": "not-an-exporter"}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "invalid_request");
+    assert!(value["detail"]["exporter_type"].is_array(), "{value}");
+}
+
+/// halt — the credential is rejected.
+#[tokio::test]
+async fn export_create_halts_on_rejected_credentials() {
+    let p = promise(
+        &promise_id("export-halt"),
+        "export.create",
+        json!({"table_id": ok_table(), "exporter_type": "csv"}),
+        in_ms(60_000),
+    );
+
+    let reason = halted(plugin::process(&bad_credential(), &p).await);
+
+    assert!(reason.contains("ERROR_INVALID_CREDENTIALS"), "{reason}");
+}
+
+/// halt — §4.10.1: only the csv exporter is registered without a licence,
+/// and the 402 `ERROR_FEATURE_NOT_AVAILABLE` the others answer is
+/// `_check`'s second halt: an operator must license the instance.
+#[tokio::test]
+async fn export_create_halts_when_the_exporter_needs_a_licence() {
+    let p = promise(
+        &promise_id("export-licence"),
+        "export.create",
+        json!({"table_id": ok_table(), "exporter_type": "json"}),
+        in_ms(60_000),
+    );
+
+    let reason = halted(plugin::process(&config(), &p).await);
+
+    assert!(reason.contains("ERROR_FEATURE_NOT_AVAILABLE"), "{reason}");
+}
+
+/// The deadline — `timeout_at` already in the past. No verdict: the server
+/// settles a timed-out promise itself.
+#[tokio::test]
+async fn export_create_releases_at_the_deadline() {
+    let p = promise(
+        &promise_id("export-deadline"),
+        "export.create",
+        json!({"table_id": ok_table(), "exporter_type": "csv"}),
+        in_ms(-1_000),
+    );
+
+    let reason = released(plugin::process(&config(), &p).await);
+
+    assert_eq!(reason, "promise timed out");
+}
+
+// ─── export.get (§4.11) ───────────────────────────────────────────────────────
+
+/// resolved — = response.body, the export job.
 #[tokio::test]
 async fn export_get_resolves_with_the_job() {
-    let job_id = create_export_job(fixture_ok()).await;
+    let job_id = seed_export().await;
     let p = promise(
         &promise_id("export-get"),
         "export.get",
@@ -242,41 +1230,45 @@ async fn export_get_resolves_with_the_job() {
     let value = resolved(plugin::process(&config(), &p).await);
 
     assert_eq!(value["id"], job_id);
-    assert_eq!(value["table"], fixture_ok());
     assert_eq!(value["exporter_type"], "csv");
     assert!(value["state"].is_string(), "{value}");
-    // = response.body, so the keys the Resolved mapping of §4.1 drops are here.
-    assert!(value["progress_percentage"].is_number(), "{value}");
-    assert!(value.get("status").is_some(), "{value}");
+    assert!(value["status"].is_string(), "{value}");
+    assert!(value["created_at"].is_string(), "{value}");
 }
 
-/// `not_found` — a job id no export job has.
+/// `job_not_found` — a nonexistent job id.
 #[tokio::test]
-async fn export_get_rejects_not_found() {
+async fn export_get_rejects_job_not_found() {
     let p = promise(
         &promise_id("export-get-404"),
         "export.get",
-        json!({"job_id": 999_999}),
+        json!({"job_id": NO_JOB}),
         in_ms(60_000),
     );
 
     let value = rejected(plugin::process(&config(), &p).await);
 
-    assert_eq!(value["code"], "not_found");
-    // detail = response.body of the 404 as text.
-    let detail = value["detail"].as_str().expect("detail is text");
-    assert!(detail.contains("ERROR_EXPORT_JOB_DOES_NOT_EXIST"), "{detail}");
+    assert_eq!(value["code"], "job_not_found");
+    assert!(value["detail"].is_string(), "{value}");
 }
 
 /// `invalid_request` — `job_id` is required by the Param schema.
 #[tokio::test]
 async fn export_get_rejects_invalid_request() {
-    let p = promise(&promise_id("export-get-bad"), "export.get", json!({}), in_ms(60_000));
+    let p = promise(
+        &promise_id("export-get-bad"),
+        "export.get",
+        json!({}),
+        in_ms(60_000),
+    );
 
     let value = rejected(plugin::process(&config(), &p).await);
 
     assert_eq!(value["code"], "invalid_request");
-    assert!(value["detail"].as_str().unwrap_or_default().contains("job_id"), "{value}");
+    assert!(
+        value["detail"].as_str().unwrap_or_default().contains("job_id"),
+        "{value}"
+    );
 }
 
 /// halt — the credential is rejected.
@@ -294,10 +1286,265 @@ async fn export_get_halts_on_rejected_credentials() {
     assert!(reason.contains("ERROR_INVALID_CREDENTIALS"), "{reason}");
 }
 
-// ─── table.list (§4.3) ────────────────────────────────────────────────────────
+// ─── table.import (§4.12) ─────────────────────────────────────────────────────
 
-/// resolved — = response.body, the array carrying the table id
-/// `export.create` takes.
+/// resolved — the succeeding work item, and the pending → terminal path: the
+/// create response is state "pending" with `progress_percentage` 0, so a
+/// resolved value at "finished" and 100 is proof the poll loop watched the
+/// job. `original_file_name` is the stamp = sanitize(promise.id).
+#[tokio::test]
+async fn table_import_resolves_when_the_import_finishes() {
+    let id = promise_id("table-import");
+    let p = promise(
+        &id,
+        "table.import",
+        json!({"table_id": ok_table(), "data": [["imported", "by table.import"]]}),
+        in_ms(300_000),
+    );
+
+    let value = resolved(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["state"], "finished");
+    assert_eq!(value["type"], "file_import");
+    assert_eq!(value["table_id"], ok_table());
+    assert_eq!(value["progress_percentage"], 100);
+    assert_eq!(value["human_readable_error"], "");
+    assert_eq!(value["report"]["failing_rows"], json!({}));
+    // = sanitize(promise.id)
+    let stamp = value["original_file_name"].as_str().expect("original_file_name");
+    assert!(stamp.starts_with(&id), "{stamp} should be derived from {id}");
+    assert!(value["database_id"].is_i64(), "{value}");
+    // The Resolved schema is exactly these nine keys.
+    assert_eq!(value.as_object().expect("object").len(), 9, "{value}");
+}
+
+/// resolved — the failing work item. §5 provisions `Amounts` with a number
+/// field, so a non-numeric value leaves the job at "finished" with that row
+/// named in `report.failing_rows` by its index in `data`: those rows were
+/// rejected by their field types and were not created.
+#[tokio::test]
+async fn table_import_resolves_with_failing_rows() {
+    let p = promise(
+        &promise_id("table-import-failing"),
+        "table.import",
+        json!({"table_id": fail_table(), "data": [["a", "not-a-number"]]}),
+        in_ms(300_000),
+    );
+
+    let value = resolved(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["state"], "finished");
+    assert_eq!(value["table_id"], fail_table());
+    let failing = value["report"]["failing_rows"]
+        .as_object()
+        .expect("failing_rows is an object");
+    assert_eq!(failing.len(), 1, "{value}");
+    assert!(failing.contains_key("0"), "{value}");
+}
+
+/// Re-entry — the job an earlier attempt created is recovered by its stamp,
+/// so a second delivery attaches to it rather than importing the rows twice.
+#[tokio::test]
+async fn table_import_reattaches_on_re_entry() {
+    let id = promise_id("table-import-reentry");
+    let p = promise(
+        &id,
+        "table.import",
+        json!({"table_id": ok_table(), "data": [["reentry", "once only"]]}),
+        in_ms(300_000),
+    );
+
+    let first = resolved(plugin::process(&config(), &p).await);
+    let second = resolved(plugin::process(&config(), &p).await);
+
+    assert_eq!(first["id"], second["id"]);
+    assert_eq!(first["original_file_name"], second["original_file_name"]);
+    // One promise, one job.
+    let stamp = first["original_file_name"].as_str().expect("original_file_name");
+    assert_eq!(import_jobs_stamped(stamp).await, 1);
+}
+
+/// `table_not_found` — a nonexistent table id.
+#[tokio::test]
+async fn table_import_rejects_table_not_found() {
+    let p = promise(
+        &promise_id("table-import-notable"),
+        "table.import",
+        json!({"table_id": NO_TABLE, "data": [["x"]]}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "table_not_found");
+    assert!(value["detail"].is_string(), "{value}");
+}
+
+/// `invalid_request` — the Param schema requires at least one row in `data`.
+#[tokio::test]
+async fn table_import_rejects_invalid_request() {
+    let p = promise(
+        &promise_id("table-import-bad"),
+        "table.import",
+        json!({"table_id": ok_table(), "data": []}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "invalid_request");
+    assert!(value["detail"]["data"].is_array(), "{value}");
+}
+
+/// halt — the credential is rejected.
+#[tokio::test]
+async fn table_import_halts_on_rejected_credentials() {
+    let p = promise(
+        &promise_id("table-import-halt"),
+        "table.import",
+        json!({"table_id": ok_table(), "data": [["x"]]}),
+        in_ms(60_000),
+    );
+
+    let reason = halted(plugin::process(&bad_credential(), &p).await);
+
+    assert!(reason.contains("ERROR_INVALID_CREDENTIALS"), "{reason}");
+}
+
+/// The deadline — `timeout_at` already in the past.
+#[tokio::test]
+async fn table_import_releases_at_the_deadline() {
+    let p = promise(
+        &promise_id("table-import-deadline"),
+        "table.import",
+        json!({"table_id": ok_table(), "data": [["deadline", "row"]]}),
+        in_ms(-1_000),
+    );
+
+    let reason = released(plugin::process(&config(), &p).await);
+
+    assert_eq!(reason, "promise timed out");
+}
+
+// ─── job.get (§4.13) ──────────────────────────────────────────────────────────
+
+/// resolved — = response.body, the job.
+#[tokio::test]
+async fn job_get_resolves_with_the_job() {
+    let job_id = seed_import_job().await;
+    let p = promise(
+        &promise_id("job-get"),
+        "job.get",
+        json!({"job_id": job_id}),
+        in_ms(60_000),
+    );
+
+    let value = resolved(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["id"], job_id);
+    assert_eq!(value["type"], "file_import");
+    assert!(value["state"].is_string(), "{value}");
+    assert!(value["report"]["failing_rows"].is_object(), "{value}");
+}
+
+/// `job_not_found` — a nonexistent job id.
+#[tokio::test]
+async fn job_get_rejects_job_not_found() {
+    let p = promise(
+        &promise_id("job-get-404"),
+        "job.get",
+        json!({"job_id": NO_JOB}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "job_not_found");
+    assert!(value["detail"].is_string(), "{value}");
+}
+
+/// `invalid_request` — `job_id` is required by the Param schema.
+#[tokio::test]
+async fn job_get_rejects_invalid_request() {
+    let p = promise(&promise_id("job-get-bad"), "job.get", json!({}), in_ms(60_000));
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "invalid_request");
+    assert!(
+        value["detail"].as_str().unwrap_or_default().contains("job_id"),
+        "{value}"
+    );
+}
+
+/// halt — the credential is rejected.
+#[tokio::test]
+async fn job_get_halts_on_rejected_credentials() {
+    let p = promise(
+        &promise_id("job-get-halt"),
+        "job.get",
+        json!({"job_id": 1}),
+        in_ms(60_000),
+    );
+
+    let reason = halted(plugin::process(&bad_credential(), &p).await);
+
+    assert!(reason.contains("ERROR_INVALID_CREDENTIALS"), "{reason}");
+}
+
+// ─── database.list (§4.14) ────────────────────────────────────────────────────
+
+/// resolved — = response.body, every application these credentials can see,
+/// with the tables of each database inline.
+///
+/// `invalid_request` is this operation's only rejection code and its Param
+/// schema takes no arguments, so nothing about the promise can induce it:
+/// the endpoint has no query to malform.
+#[tokio::test]
+async fn database_list_resolves_with_the_applications() {
+    let p = promise(
+        &promise_id("database-list"),
+        "database.list",
+        json!({}),
+        in_ms(60_000),
+    );
+
+    let value = resolved(plugin::process(&config(), &p).await);
+
+    let apps = value.as_array().expect("the body is an array");
+    let database = apps
+        .iter()
+        .find(|a| a["type"] == "database")
+        .expect("a database application");
+    assert!(database["id"].is_i64(), "{value}");
+    assert!(database["name"].is_string(), "{value}");
+    assert!(database["workspace"]["id"].is_i64(), "{value}");
+    assert!(database["created_on"].is_string(), "{value}");
+    let tables = database["tables"].as_array().expect("tables inline");
+    assert!(
+        tables.iter().any(|t| t["id"] == ok_table()),
+        "the fixture table is not listed: {value}"
+    );
+}
+
+/// halt — the credential is rejected.
+#[tokio::test]
+async fn database_list_halts_on_rejected_credentials() {
+    let p = promise(
+        &promise_id("database-list-halt"),
+        "database.list",
+        json!({}),
+        in_ms(60_000),
+    );
+
+    let reason = halted(plugin::process(&bad_credential(), &p).await);
+
+    assert!(reason.contains("ERROR_INVALID_CREDENTIALS"), "{reason}");
+}
+
+// ─── table.list (§4.15) ───────────────────────────────────────────────────────
+
+/// resolved — = response.body, the tables of one database.
 #[tokio::test]
 async fn table_list_resolves_with_the_tables() {
     let p = promise(
@@ -310,45 +1557,49 @@ async fn table_list_resolves_with_the_tables() {
     let value = resolved(plugin::process(&config(), &p).await);
 
     let tables = value.as_array().expect("the body is an array");
-    let ok = tables
+    let table = tables
         .iter()
-        .find(|t| t["id"] == fixture_ok())
-        .unwrap_or_else(|| panic!("the fixture table is missing: {value}"));
-    assert!(ok["name"].is_string(), "{ok}");
-    assert_eq!(ok["database_id"], database_id().await);
-    assert!(ok["order"].is_i64(), "{ok}");
-    // The trashed table is not listed.
-    assert!(!tables.iter().any(|t| t["id"] == fixture_fail()), "{value}");
+        .find(|t| t["id"] == ok_table())
+        .expect("the fixture table");
+    assert!(table["name"].is_string(), "{value}");
+    assert!(table["order"].is_i64(), "{value}");
+    assert_eq!(table["data_sync"], Value::Null);
 }
 
-/// `not_found` — a database id no application has.
+/// `database_not_found` — a nonexistent database id.
 #[tokio::test]
-async fn table_list_rejects_not_found() {
+async fn table_list_rejects_database_not_found() {
     let p = promise(
         &promise_id("table-list-404"),
         "table.list",
-        json!({"database_id": 999_999}),
+        json!({"database_id": NO_DATABASE}),
         in_ms(60_000),
     );
 
     let value = rejected(plugin::process(&config(), &p).await);
 
-    assert_eq!(value["code"], "not_found");
-    // detail = response.body of the 404 as text.
-    let detail = value["detail"].as_str().expect("detail is text");
-    assert!(detail.contains("ERROR_APPLICATION_DOES_NOT_EXIST"), "{detail}");
+    assert_eq!(value["code"], "database_not_found");
+    assert!(value["detail"].is_string(), "{value}");
 }
 
 /// `invalid_request` — `database_id` is required by the Param schema.
 #[tokio::test]
 async fn table_list_rejects_invalid_request() {
-    let p = promise(&promise_id("table-list-bad"), "table.list", json!({}), in_ms(60_000));
+    let p = promise(
+        &promise_id("table-list-bad"),
+        "table.list",
+        json!({}),
+        in_ms(60_000),
+    );
 
     let value = rejected(plugin::process(&config(), &p).await);
 
     assert_eq!(value["code"], "invalid_request");
     assert!(
-        value["detail"].as_str().unwrap_or_default().contains("database_id"),
+        value["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("database_id"),
         "{value}"
     );
 }
@@ -368,83 +1619,66 @@ async fn table_list_halts_on_rejected_credentials() {
     assert!(reason.contains("ERROR_INVALID_CREDENTIALS"), "{reason}");
 }
 
-// ─── field.list (§4.4) ────────────────────────────────────────────────────────
+// ─── field.list (§4.16) ───────────────────────────────────────────────────────
 
-/// resolved — = response.body, the array carrying the field ids
-/// `export.create` takes in `fields`, `order_by` and `filters`.
+/// resolved — = response.body, the fields of one table.
 #[tokio::test]
 async fn field_list_resolves_with_the_fields() {
     let p = promise(
         &promise_id("field-list"),
         "field.list",
-        json!({"table_id": fixture_ok()}),
+        json!({"table_id": fail_table()}),
         in_ms(60_000),
     );
 
     let value = resolved(plugin::process(&config(), &p).await);
 
     let fields = value.as_array().expect("the body is an array");
-    assert!(!fields.is_empty(), "the seeded table has fields: {value}");
-    assert!(fields.iter().any(|f| f["primary"] == json!(true)), "{value}");
-    for field in fields {
-        assert_eq!(field["table_id"], fixture_ok());
-        assert!(field["id"].is_i64(), "{field}");
-        assert!(field["name"].is_string(), "{field}");
-        assert!(field["type"].is_string(), "{field}");
-        assert!(field["read_only"].is_boolean(), "{field}");
-    }
+    let amount = fields
+        .iter()
+        .find(|f| f["name"] == "Amount")
+        .expect("the Amount field §5 provisions");
+    assert_eq!(amount["type"], "number");
+    assert_eq!(amount["table_id"], fail_table());
+    assert_eq!(amount["primary"], false);
+    assert_eq!(amount["read_only"], false);
+    assert!(amount["id"].is_i64(), "{value}");
+    assert!(amount["order"].is_i64(), "{value}");
 }
 
-/// `table_not_found` — the trashed table §5.2 provisions.
+/// `table_not_found` — a nonexistent table id.
 #[tokio::test]
 async fn field_list_rejects_table_not_found() {
     let p = promise(
-        &promise_id("field-list-notable"),
+        &promise_id("field-list-404"),
         "field.list",
-        json!({"table_id": fixture_fail()}),
+        json!({"table_id": NO_TABLE}),
         in_ms(60_000),
     );
 
     let value = rejected(plugin::process(&config(), &p).await);
 
     assert_eq!(value["code"], "table_not_found");
-    // detail = response.body of the 404 ({error, detail}).
-    assert_eq!(value["detail"]["error"], "ERROR_TABLE_DOES_NOT_EXIST");
+    assert!(value["detail"].is_string(), "{value}");
 }
 
-/// `view_not_found` — a real table, and a view id no view has.
-#[tokio::test]
-async fn field_list_rejects_view_not_found() {
-    let p = promise(
-        &promise_id("field-list-noview"),
-        "field.list",
-        json!({"table_id": fixture_ok(), "view": 999_999}),
-        in_ms(60_000),
-    );
-
-    let value = rejected(plugin::process(&config(), &p).await);
-
-    assert_eq!(value["code"], "view_not_found");
-    assert_eq!(value["detail"]["error"], "ERROR_VIEW_DOES_NOT_EXIST");
-}
-
-/// `invalid_request` — `view` is documented as an integer, and the query
-/// parameter is passed through as the caller wrote it.
+/// `invalid_request` — `table_id` is required by the Param schema.
 #[tokio::test]
 async fn field_list_rejects_invalid_request() {
     let p = promise(
         &promise_id("field-list-bad"),
         "field.list",
-        json!({"table_id": fixture_ok(), "view": "not-an-integer"}),
+        json!({}),
         in_ms(60_000),
     );
 
     let value = rejected(plugin::process(&config(), &p).await);
 
     assert_eq!(value["code"], "invalid_request");
-    // detail = response.body of the 400 as text.
-    let detail = value["detail"].as_str().expect("detail is text");
-    assert!(detail.contains("ERROR_QUERY_PARAMETER_VALIDATION"), "{detail}");
+    assert!(
+        value["detail"].as_str().unwrap_or_default().contains("table_id"),
+        "{value}"
+    );
 }
 
 /// halt — the credential is rejected.
@@ -453,7 +1687,173 @@ async fn field_list_halts_on_rejected_credentials() {
     let p = promise(
         &promise_id("field-list-halt"),
         "field.list",
-        json!({"table_id": fixture_ok()}),
+        json!({"table_id": ok_table()}),
+        in_ms(60_000),
+    );
+
+    let reason = halted(plugin::process(&bad_credential(), &p).await);
+
+    assert!(reason.contains("ERROR_INVALID_CREDENTIALS"), "{reason}");
+}
+
+// ─── view.list (§4.17) ────────────────────────────────────────────────────────
+
+/// resolved — = response.body, the views of one table.
+#[tokio::test]
+async fn view_list_resolves_with_the_views() {
+    let p = promise(
+        &promise_id("view-list"),
+        "view.list",
+        json!({"table_id": ok_table(), "type": "grid", "include": ["filters", "sortings"]}),
+        in_ms(60_000),
+    );
+
+    let value = resolved(plugin::process(&config(), &p).await);
+
+    let views = value.as_array().expect("the body is an array");
+    assert!(!views.is_empty(), "{value}");
+    assert_eq!(views[0]["table_id"], ok_table());
+    assert_eq!(views[0]["type"], "grid");
+    assert!(views[0]["id"].is_i64(), "{value}");
+    assert!(views[0]["name"].is_string(), "{value}");
+    // include=filters,sortings — comma-joined into a single query value.
+    assert!(views[0]["filters"].is_array(), "{value}");
+    assert!(views[0]["sortings"].is_array(), "{value}");
+}
+
+/// `table_not_found` — a nonexistent table id.
+#[tokio::test]
+async fn view_list_rejects_table_not_found() {
+    let p = promise(
+        &promise_id("view-list-404"),
+        "view.list",
+        json!({"table_id": NO_TABLE}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "table_not_found");
+    assert!(value["detail"].is_string(), "{value}");
+}
+
+/// `invalid_request` — `limit` is documented as an integer.
+#[tokio::test]
+async fn view_list_rejects_invalid_request() {
+    let p = promise(
+        &promise_id("view-list-bad"),
+        "view.list",
+        json!({"table_id": ok_table(), "limit": "not-an-integer"}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "invalid_request");
+    assert!(value["detail"]["limit"].is_array(), "{value}");
+}
+
+/// halt — the credential is rejected.
+#[tokio::test]
+async fn view_list_halts_on_rejected_credentials() {
+    let p = promise(
+        &promise_id("view-list-halt"),
+        "view.list",
+        json!({"table_id": ok_table()}),
+        in_ms(60_000),
+    );
+
+    let reason = halted(plugin::process(&bad_credential(), &p).await);
+
+    assert!(reason.contains("ERROR_INVALID_CREDENTIALS"), "{reason}");
+}
+
+// ─── rowhistory.list (§4.18) ──────────────────────────────────────────────────
+
+/// resolved — = response.body, one page of the row's change history, with
+/// the before and after values of every field an action touched.
+#[tokio::test]
+async fn rowhistory_list_resolves_with_the_page() {
+    let row_id = seed_row("rowhistory").await;
+    update_row(ok_table(), row_id, json!({"Notes": "history"})).await;
+    let p = promise(
+        &promise_id("rowhistory"),
+        "rowhistory.list",
+        json!({"table_id": ok_table(), "row_id": row_id, "limit": 200, "offset": 0}),
+        in_ms(60_000),
+    );
+
+    let value = resolved(plugin::process(&config(), &p).await);
+
+    assert!(value["count"].is_number(), "{value}");
+    assert_eq!(value["previous"], Value::Null);
+    let results = value["results"].as_array().expect("results is an array");
+    assert!(!results.is_empty(), "no history for row {row_id}: {value}");
+    assert_eq!(results[0]["action_type"], "update_rows");
+    assert!(results[0]["timestamp"].is_string(), "{value}");
+    assert!(results[0]["before"].is_object(), "{value}");
+    assert!(results[0]["after"].is_object(), "{value}");
+    assert!(results[0]["fields_metadata"].is_object(), "{value}");
+}
+
+/// `table_not_found` — a nonexistent table id.
+#[tokio::test]
+async fn rowhistory_list_rejects_table_not_found() {
+    let p = promise(
+        &promise_id("rowhistory-notable"),
+        "rowhistory.list",
+        json!({"table_id": NO_TABLE, "row_id": 1}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "table_not_found");
+    assert!(value["detail"].is_string(), "{value}");
+}
+
+/// `row_not_found` — a nonexistent row id.
+#[tokio::test]
+async fn rowhistory_list_rejects_row_not_found() {
+    let p = promise(
+        &promise_id("rowhistory-norow"),
+        "rowhistory.list",
+        json!({"table_id": ok_table(), "row_id": NO_ROW}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "row_not_found");
+    assert!(value["detail"].is_string(), "{value}");
+}
+
+/// `invalid_request` — `row_id` is required by the Param schema.
+#[tokio::test]
+async fn rowhistory_list_rejects_invalid_request() {
+    let p = promise(
+        &promise_id("rowhistory-bad"),
+        "rowhistory.list",
+        json!({"table_id": ok_table()}),
+        in_ms(60_000),
+    );
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(value["code"], "invalid_request");
+    assert!(
+        value["detail"].as_str().unwrap_or_default().contains("row_id"),
+        "{value}"
+    );
+}
+
+/// halt — the credential is rejected.
+#[tokio::test]
+async fn rowhistory_list_halts_on_rejected_credentials() {
+    let p = promise(
+        &promise_id("rowhistory-halt"),
+        "rowhistory.list",
+        json!({"table_id": ok_table(), "row_id": 1}),
         in_ms(60_000),
     );
 
@@ -467,24 +1867,45 @@ async fn field_list_halts_on_rejected_credentials() {
 /// A func no operation serves is a permanent rejection naming it.
 #[tokio::test]
 async fn an_unknown_func_is_rejected() {
-    let p = promise(&promise_id("unknown"), "export.explode", json!({}), in_ms(60_000));
+    let p = promise(&promise_id("unknown"), "row.explode", json!({}), in_ms(60_000));
 
     let value = rejected(plugin::process(&config(), &p).await);
 
-    assert_eq!(value, json!({"code": "unknown_func", "detail": "export.explode"}));
+    assert_eq!(value, json!({"code": "unknown_func", "detail": "row.explode"}));
+}
+
+/// A param that is not a `{func, args}` document is a permanent rejection:
+/// the param is immutable, so no redelivery can make it one.
+#[tokio::test]
+async fn a_param_without_a_func_is_rejected() {
+    let mut p = promise(&promise_id("nofunc"), "row.list", json!({}), in_ms(60_000));
+    p.param = PromiseValue {
+        headers: None,
+        data: Some(base64::engine::general_purpose::STANDARD.encode(r#"{"args":{}}"#)),
+    };
+
+    let value = rejected(plugin::process(&config(), &p).await);
+
+    assert_eq!(
+        value,
+        json!({"code": "invalid_request", "detail": "param has no func"})
+    );
 }
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
 /// §2, built from the environment §5.2 exports. `poll` is overridden to 1s:
 /// the default 2s would make every pending → terminal test wait a full
-/// interval past the export's own end.
+/// interval past the job's own end. `poll_export` and `poll_table` are left
+/// unset so both cascade to it.
 fn config() -> Config {
     Config {
         base_url: env("BASEROW_BASE_URL"),
         email: env("BASEROW_EMAIL"),
         password: env("BASEROW_PASSWORD"),
         poll: Duration::from_secs(1),
+        poll_export: None,
+        poll_table: None,
     }
 }
 
@@ -496,15 +1917,16 @@ fn bad_credential() -> Config {
     }
 }
 
-/// The table §5.2 seeds with example fields and rows: the export succeeds and
-/// the exported file is not empty.
-fn fixture_ok() -> i64 {
+/// `Tasks`: all text, so every write it is given succeeds.
+fn ok_table() -> i64 {
     env("BASEROW_FIXTURE_OK").parse().expect("BASEROW_FIXTURE_OK is an integer")
 }
 
-/// The table §5.2 trashes: its id is permanently unresolvable.
-fn fixture_fail() -> i64 {
-    env("BASEROW_FIXTURE_FAIL").parse().expect("BASEROW_FIXTURE_FAIL is an integer")
+/// `Amounts`: `Amount` is a number field, so a non-numeric value fails.
+fn fail_table() -> i64 {
+    env("BASEROW_FIXTURE_FAIL")
+        .parse()
+        .expect("BASEROW_FIXTURE_FAIL is an integer")
 }
 
 fn env(key: &str) -> String {
@@ -529,8 +1951,8 @@ fn promise(id: &str, func: &str, args: Value, timeout_at: i64) -> PromiseRecord 
     }
 }
 
-/// A fresh promise id per test. Nothing of it reaches Baserow — the
-/// specification's Idempotency note records that there is nowhere to put it.
+/// A fresh promise id per test — and one that survives the frame's sanitize
+/// unchanged, so a stamp may be checked against it with `starts_with`.
 fn promise_id(what: &str) -> String {
     format!("baserow.{what}.{}", nanos())
 }
@@ -538,7 +1960,7 @@ fn promise_id(what: &str) -> String {
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .expect("the clock is after the epoch")
         .as_millis() as i64
 }
 
@@ -549,7 +1971,7 @@ fn in_ms(delta: i64) -> i64 {
 fn nanos() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .expect("the clock is after the epoch")
         .as_nanos()
 }
 
@@ -590,25 +2012,9 @@ fn http() -> reqwest::Client {
     CLIENT.get_or_init(reqwest::Client::new).clone()
 }
 
-/// One access token, re-minted every five minutes: tokens live
-/// BASEROW_ACCESS_TOKEN_LIFETIME_MINUTES (10 by default), which a whole test
-/// binary can outlast, and the `cancelled` induction cannot afford a token
-/// request between noticing the plugin's job and cancelling it.
+/// A JWT, minted per call: `BASEROW_ACCESS_TOKEN_LIFETIME_MINUTES` is 10 and
+/// a whole test binary outlives that.
 async fn bearer() -> String {
-    static TOKEN: tokio::sync::Mutex<Option<(String, std::time::Instant)>> =
-        tokio::sync::Mutex::const_new(None);
-    let mut cached = TOKEN.lock().await;
-    if let Some((token, minted)) = cached.as_ref() {
-        if minted.elapsed() < Duration::from_secs(300) {
-            return token.clone();
-        }
-    }
-    let fresh = mint().await;
-    *cached = Some((fresh.clone(), std::time::Instant::now()));
-    fresh
-}
-
-async fn mint() -> String {
     let body: Value = http()
         .post(format!("{}/api/user/token-auth/", env("BASEROW_BASE_URL")))
         .json(&json!({"email": env("BASEROW_EMAIL"), "password": env("BASEROW_PASSWORD")}))
@@ -621,135 +2027,144 @@ async fn mint() -> String {
     format!("JWT {}", body["access_token"].as_str().expect("access_token"))
 }
 
-/// The database the §5.2 fixtures live in — `table.list`'s argument, which
-/// §5.2 does not export, read back off the fixture table itself.
-async fn database_id() -> i64 {
+/// A row in `Tasks`, named after the test that asked for it.
+async fn seed_row(name: &str) -> i64 {
+    create_row(ok_table(), json!({"Name": name, "Notes": "seed"})).await
+}
+
+/// A row in `Amounts`, with a value its number field accepts.
+async fn seed_fail_row(name: &str) -> i64 {
+    create_row(fail_table(), json!({"Label": name, "Amount": 1})).await
+}
+
+async fn create_row(table_id: i64, values: Value) -> i64 {
     let body: Value = http()
+        .post(format!(
+            "{}/api/database/rows/table/{table_id}/?user_field_names=true",
+            env("BASEROW_BASE_URL")
+        ))
+        .header("Authorization", bearer().await)
+        .json(&values)
+        .send()
+        .await
+        .expect("create row request")
+        .json()
+        .await
+        .expect("create row response is JSON");
+    body["id"].as_i64().unwrap_or_else(|| panic!("no row id in {body}"))
+}
+
+async fn update_row(table_id: i64, row_id: i64, values: Value) {
+    let status = http()
+        .patch(format!(
+            "{}/api/database/rows/table/{table_id}/{row_id}/?user_field_names=true",
+            env("BASEROW_BASE_URL")
+        ))
+        .header("Authorization", bearer().await)
+        .json(&values)
+        .send()
+        .await
+        .expect("update row request")
+        .status();
+    assert!(status.is_success(), "updating row {row_id}: {status}");
+}
+
+async fn row_status(table_id: i64, row_id: i64) -> u16 {
+    http()
         .get(format!(
-            "{}/api/database/tables/{}/",
-            env("BASEROW_BASE_URL"),
-            fixture_ok()
+            "{}/api/database/rows/table/{table_id}/{row_id}/",
+            env("BASEROW_BASE_URL")
         ))
         .header("Authorization", bearer().await)
         .send()
         .await
-        .expect("get table request")
-        .json()
-        .await
-        .expect("get table response is JSON");
-    body["database_id"].as_i64().expect("database_id")
+        .expect("get row request")
+        .status()
+        .as_u16()
 }
 
-/// Start one export job of this table, outside the plugin. Every such job
-/// cancels the user's other unfinished jobs — which is what the `cancelled`
-/// induction is made of.
-async fn create_export_job(table_id: i64) -> i64 {
+/// The database the §5 fixture tables live in.
+async fn database_id() -> i64 {
+    let body: Value = http()
+        .get(format!("{}/api/applications/", env("BASEROW_BASE_URL")))
+        .header("Authorization", bearer().await)
+        .send()
+        .await
+        .expect("applications request")
+        .json()
+        .await
+        .expect("applications response is JSON");
+    body.as_array()
+        .expect("applications is an array")
+        .iter()
+        .find(|a| {
+            a["tables"]
+                .as_array()
+                .is_some_and(|ts| ts.iter().any(|t| t["id"] == ok_table()))
+        })
+        .and_then(|a| a["id"].as_i64())
+        .expect("the database holding the fixture table")
+}
+
+/// An export job to read back with export.get.
+async fn seed_export() -> i64 {
     let body: Value = http()
         .post(format!(
-            "{}/api/database/export/table/{table_id}/",
-            env("BASEROW_BASE_URL")
+            "{}/api/database/export/table/{}/",
+            env("BASEROW_BASE_URL"),
+            ok_table()
         ))
         .header("Authorization", bearer().await)
         .json(&json!({"exporter_type": "csv"}))
         .send()
         .await
-        .expect("create export request")
+        .expect("export request")
         .json()
         .await
-        .expect("create export response is JSON");
+        .expect("export response is JSON");
     body["id"].as_i64().unwrap_or_else(|| panic!("no export job id in {body}"))
 }
 
-/// Where an export job is, as the `cancelled` induction needs to read it.
-#[derive(PartialEq)]
-enum JobState {
-    /// Queued: a cancellation now is overwritten when the task starts.
-    Pending,
-    /// Running: a cancellation now is honoured before the last row.
-    Exporting,
-    /// finished, failed, cancelled or expired.
-    Terminal,
+/// A file_import job to read back with job.get.
+async fn seed_import_job() -> i64 {
+    let body: Value = http()
+        .post(format!(
+            "{}/api/database/tables/{}/import/async/",
+            env("BASEROW_BASE_URL"),
+            ok_table()
+        ))
+        .header("Authorization", bearer().await)
+        .json(&json!({
+            "data": [["seeded", "for job.get"]],
+            "original_file_name": format!("seed-{}", nanos()),
+        }))
+        .send()
+        .await
+        .expect("import request")
+        .json()
+        .await
+        .expect("import response is JSON");
+    body["id"].as_i64().unwrap_or_else(|| panic!("no job id in {body}"))
 }
-use JobState::{Exporting, Pending, Terminal};
 
-/// The state of one export job, or `None` while no job has that id yet.
-async fn export_job_state(job_id: i64) -> Option<JobState> {
-    let response = http()
+/// How many of this account's file_import jobs carry this stamp.
+async fn import_jobs_stamped(stamp: &str) -> usize {
+    let body: Value = http()
         .get(format!(
-            "{}/api/database/export/{job_id}/",
+            "{}/api/jobs/?type=file_import&limit=100&offset=0",
             env("BASEROW_BASE_URL")
         ))
         .header("Authorization", bearer().await)
         .send()
         .await
-        .expect("get export request");
-    if response.status().as_u16() == 404 {
-        return None;
-    }
-    let body: Value = response.json().await.expect("get export response is JSON");
-    Some(match body["state"].as_str().unwrap_or_default() {
-        "pending" => Pending,
-        "exporting" => Exporting,
-        _ => Terminal,
-    })
-}
-
-/// A table whose export takes long enough to be cancelled mid-flight. §5.2
-/// provisions only the two-row `BASEROW_FIXTURE_OK`, whose export is over in
-/// milliseconds, so the `cancelled` induction fills a table of its own: 4000
-/// rows of 4KB export for a few hundred milliseconds. Provisioned once per
-/// test binary.
-async fn big_table() -> i64 {
-    static TABLE: tokio::sync::OnceCell<i64> = tokio::sync::OnceCell::const_new();
-    *TABLE
-        .get_or_init(|| async {
-            let base = env("BASEROW_BASE_URL");
-            let table: Value = http()
-                .post(format!(
-                    "{base}/api/database/tables/database/{}/",
-                    database_id().await
-                ))
-                .header("Authorization", bearer().await)
-                .json(&json!({"name": format!("Fixture Big {}", nanos())}))
-                .send()
-                .await
-                .expect("create table request")
-                .json()
-                .await
-                .expect("create table response is JSON");
-            let table_id = table["id"].as_i64().expect("table id");
-
-            // Only the text fields of the seeded table take a text value.
-            let fields: Value = http()
-                .get(format!("{base}/api/database/fields/table/{table_id}/"))
-                .header("Authorization", bearer().await)
-                .send()
-                .await
-                .expect("list fields request")
-                .json()
-                .await
-                .expect("list fields response is JSON");
-            let mut row = serde_json::Map::new();
-            for field in fields.as_array().expect("fields is an array") {
-                if field["type"] == "text" || field["type"] == "long_text" {
-                    let id = field["id"].as_i64().expect("field id");
-                    row.insert(format!("field_{id}"), json!("x".repeat(2_000)));
-                }
-            }
-
-            let items: Vec<Value> = (0..200).map(|_| Value::Object(row.clone())).collect();
-            for _ in 0..20 {
-                let status = http()
-                    .post(format!("{base}/api/database/rows/table/{table_id}/batch/"))
-                    .header("Authorization", bearer().await)
-                    .json(&json!({ "items": items }))
-                    .send()
-                    .await
-                    .expect("batch rows request")
-                    .status();
-                assert!(status.is_success(), "filling the big table: {status}");
-            }
-            table_id
-        })
+        .expect("jobs request")
+        .json()
         .await
+        .expect("jobs response is JSON");
+    body["jobs"]
+        .as_array()
+        .expect("jobs is an array")
+        .iter()
+        .filter(|j| j["original_file_name"] == stamp)
+        .count()
 }
