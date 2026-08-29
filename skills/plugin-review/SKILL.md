@@ -32,14 +32,34 @@ every step below; your final message is the findings report.
    Apply plugin-specify's Bounds — instance administration and transport
    mechanics are out.
 
+   Name the primary resource and close §0 with its lifecycle table, one
+   row per verb, so completeness is a fact rather than an impression:
+
+   | verb | provider endpoint | in §4 |
+   |---|---|---|
+   | create | `POST /api/v2/tickets` | |
+   | read | `GET /api/v2/tickets/{id}` | |
+   | list | `GET /api/v2/tickets` | |
+   | update | `PUT /api/v2/tickets/{id}` | |
+   | delete | `DELETE /api/v2/tickets/{id}` | |
+
+   Write `—` where the provider has no such endpoint; that is an answer,
+   not a gap. Fill the last column when you read §4. Batch and scoped
+   variants belong to the verb they implement, not to rows of their own.
+   Supporting a resource means supporting its lifecycle: half an API is a
+   plugin a caller has to abandon the moment they need the other half.
+
    Write this before reading §4, and do not revise it afterwards. Its
    whole value is being an independent answer: derived from the provider,
    not recovered from the document under review. Then read §4 and compare.
    Coverage gaps are findings like any other, cited against §0:
 
-   - a call a caller plainly needs and cannot make → **significant**;
-     a plugin that can create a record but not read or update it is not
-     an integration a caller can build on.
+   - a call a caller plainly needs and cannot make → **significant**. Any
+     lifecycle row where the provider has an endpoint and §4 does not
+     expose it is such a call by default; a plugin that can create a
+     record but not read or update it is not an integration a caller can
+     build on. Rank it lower only if the specification gives a reason the
+     verb is unreachable, and say why you accepted it.
    - a peripheral call a caller would occasionally want → **minor**.
    - an operation §4 exposes that §0 does not want — administration,
      transport mechanics, an inflated read — → **minor**, since surface

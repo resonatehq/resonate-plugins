@@ -149,6 +149,28 @@ def main(path, pre_review=False):
 
     invocations = re.findall(r"\| \*\*Invocation\*\* \| `?([a-z_]+)`? \|", text)
 
+    # L-20: a resource the plugin writes to but never reads back. Supporting
+    # a resource means supporting its lifecycle — a caller who can create a
+    # record and not fetch it has to leave the plugin for the other half.
+    WRITE = {"create", "update", "delete", "publish", "unpublish", "archive",
+             "unarchive", "run", "trigger", "retry", "stop", "merge", "import",
+             "move", "comment", "cancel", "send"}
+    raw_ops = re.findall(r"^### 4\.\d+ ([a-z0-9]+)\.([a-z]+)$", text, re.M)
+    singulars = {r for r, _ in raw_ops}
+    by_resource = {}
+    for res, verb in raw_ops:
+        # A batch resource is the plural of the one it batches (rows.create
+        # batches row.create); it shares that resource's reads rather than
+        # needing its own.
+        if res.endswith("s") and res[:-1] in singulars:
+            res = res[:-1]
+        by_resource.setdefault(res, set()).add(verb)
+    for res, verbs in sorted(by_resource.items()):
+        if verbs & WRITE and not verbs & {"get", "list"}:
+            warn(f"L-20: '{res}' is written by {sorted(verbs & WRITE)} but never read — "
+                 f"add {res}.get/{res}.list, or say in the Param description why the "
+                 f"provider offers no read")
+
     # L-18: a boolean the caller supplies must reach the wire as
     # "true"/"false". Python renders True/False, which providers reject.
     bool_props = set()

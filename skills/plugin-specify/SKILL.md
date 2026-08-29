@@ -191,12 +191,17 @@ if r.status_code >= 400:
      special argument — only an update or delete on the provider's own
      configuration is administration.
 
-   Size the set by the resource, not by a number. A provider with one
-   durable unit and the reads that feed it lands around four operations; a
-   provider whose primary resource has a full lifecycle needs that
-   lifecycle, and its batch variants are part of the same lifecycle rather
-   than additions to argue for. A plugin that can create a record but not
-   read, update or delete one is not an integration a caller can build on.
+   Size the set by the resource, not by a number. Name the primary
+   resource, then support its whole lifecycle — every verb the provider
+   offers on it, with batch and scoped variants belonging to the verb they
+   implement rather than counting as extra. A verb the provider supports
+   and the plugin omits needs a reason stated in the Param description of
+   the nearest operation, not silence: a caller who can create a record
+   but not read, update or delete it has to abandon the plugin the moment
+   they need the other half of the API, which is worse than never having
+   had it. A provider with one durable unit and the reads that feed it
+   lands around four operations; one with a full CRUD resource lands at
+   two or three times that, and should.
    What keeps the set honest is not a ceiling but the question behind every
    entry: would a caller driving this provider from an SDK reach for it? An
    operation that fails that question is surface to maintain and to get
