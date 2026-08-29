@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """Mechanical checks for a plugin specification. Usage:
 
-    python3 skills/plugin-specify/lint.py plugins/<name>/spec/specification.md
+    python3 skills/plugin-specify/lint.py [--pre-review] plugins/<name>/spec/specification.md
 
 Exit 0 = clean. Errors are rule violations; warnings need a human eye.
+
+--pre-review is for the specification as its author leaves it, before
+`plugin-review` has run: it promotes L-14 (Reviewed by must be empty) from
+a warning to an error, so an author who attests to their own review fails
+the check rather than passing it with a warning nobody reads.
 """
 
 import ast
@@ -27,7 +32,7 @@ def fences(text, lang):
     return [m.group(1) for m in re.finditer(rf"```{lang}\n(.*?)\n```", text, re.S)]
 
 
-def main(path):
+def main(path, pre_review=False):
     text = open(path).read()
 
     # L-1: heading skeleton
@@ -142,12 +147,55 @@ def main(path):
         if m not in ("request_response", "request_poll"):
             err(f"L-13: Monitoring '{m}' not in the vocabulary")
 
+    # L-17: at least one operation begins work. A plugin whose every
+    # operation is `read` has no unit of work to durably await, which is
+    # the reason a plugin exists (plugin-specify, "Choose the operations").
+    invocations = re.findall(r"\| \*\*Invocation\*\* \| `?([a-z_]+)`? \|", text)
+    if invocations and set(invocations) == {"read"}:
+        err("L-17: every operation is `read` — the plugin has no unit of work "
+            "to durably await; §4 must contain at least one Work operation")
+
+    # L-18: a boolean the caller supplies must reach the wire as
+    # "true"/"false". Python renders True/False, which providers reject.
+    bool_props = set()
+    for b in json_blocks:
+        try:
+            o = json.loads(b)
+        except Exception:
+            continue
+        for k, v in (o.get("properties") or {}).items():
+            t = v.get("type")
+            if t == "boolean" or (isinstance(t, list) and "boolean" in t):
+                bool_props.add(k)
+    # Only args that ride in the query string are at risk: a body boolean is
+    # rendered correctly by json=. §4.N.3 declares its query params in the
+    # {?a,b,c = promise.param.*} notation.
+    query_args = set()
+    for m in re.findall(r"\{\?([^}]+?)\s*=\s*promise\.param\.\*\}", text):
+        query_args |= {a.strip() for a in m.split(",")}
+    at_risk = sorted(bool_props & query_args)
+    if at_risk and not re.search(r'"true"\s*if|\.lower\(\)', py):
+        warn(f"L-18: boolean query args {at_risk} reach the query string as Python "
+             "True/False; the wire form is true/false")
+
+    # L-19: a poll loop that begins work absorbs transient failures with a
+    # consecutive-failure cap (plugin-specify, Implementation rules).
+    # Only `create` leaves the external identity unrecoverable on re-entry;
+    # create_idempotent and fetch_then_create can find their own work again.
+    if "request_poll" in monitorings and "create" in invocations:
+        if "time.sleep" in py and not re.search(r"failures\s*(\+=|=)", py):
+            warn("L-19: a `create` operation polls but no loop carries a "
+                 "consecutive-failure counter; its work cannot be recovered "
+                 "on re-entry, so a transient failure would duplicate it")
+
     # L-14: Reviewed by (empty at specification time)
     rb = re.search(r"\| \*\*Reviewed by\*\* \|(.*?)\|", text)
     if rb is None:
         err("L-14: no Reviewed by row")
     elif rb.group(1).strip():
-        warn(f"L-14: Reviewed by is filled ('{rb.group(1).strip()}') — expected empty pre-review")
+        msg = (f"L-14: Reviewed by is filled ('{rb.group(1).strip()}') — expected empty "
+               "pre-review; review is a separate step by a separate agent")
+        (err if pre_review else warn)(msg)
 
     # L-15: exactly one Documentation row per op
     doc_rows = len(re.findall(r"\| \*\*Documentation\*\* \|", text))
@@ -178,4 +226,7 @@ def main(path):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1]))
+    args = sys.argv[1:]
+    pre = "--pre-review" in args
+    paths = [a for a in args if not a.startswith("--")]
+    sys.exit(main(paths[0], pre))

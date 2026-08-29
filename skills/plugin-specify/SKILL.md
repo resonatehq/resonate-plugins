@@ -484,6 +484,17 @@ rules:
   different class than the docs support.
 - Every caller-supplied value placed in a URL path is escaped with
   `urllib.parse.quote(..., safe="")`.
+- The Python must put the same bytes on the wire as the implementation
+  will: `plugin-review` executes these snippets against the live
+  provider, so a snippet that only works in Python proves nothing about
+  the plugin. Two idioms need writing out rather than leaving to
+  `requests`: a boolean copied into a query string renders as
+  `"true"`/`"false"`, never Python's `True`/`False`; and an array-valued
+  query parameter is joined the way the provider documents — one
+  repeated key per element only where the provider says so, otherwise a
+  single comma-joined value. Both belong in the `_query` helper that
+  filters args into `params`, written once in the first Implementation
+  block.
 - Inside a poll loop, if the external identity cannot be recovered on
   re-entry, absorb transient failures with a consecutive-failure cap of
   5: catch exceptions, re-raise halts (`e.args[:1] == ("halt",)`), count

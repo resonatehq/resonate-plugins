@@ -72,13 +72,22 @@ governs.
    not state: clamp every poll sleep to the time remaining before
    `promise.timeout_at`; an absent response field maps to JSON `null`,
    never a crash (a Rejected `detail` may therefore be `null` — tests
-   assert it as such); booleans in query strings render lowercase
-   (`true`/`false`).
+   assert it as such). The wire bytes are not among them: the
+   specification's Python is what the reviewer executed against the live
+   provider, so the request this code sends must be byte-for-byte the
+   request that Python sent. Where it cannot be — the Python renders a
+   value one way and `reqwest` another — the specification is wrong and
+   rule 4's "stop and report" applies; do not silently correct it here.
 5. Injected identity values are `sanitize(&promise.id)` (from the frame,
    never the raw id) — exactly where the specification writes
    `sanitize(promise.id)`.
-6. Validate: `cargo check` clean; every specification operation has an
-   arm; no provider fact in the code that is not in the specification.
+6. Validate: `cargo check` clean, then
+   `python3 skills/plugin-implement/check.py plugins/<name>` clean — it is
+   the mechanical half of this step (every operation has an arm, every
+   rejection code is constructed, no provider fact in the code that the
+   specification does not carry, no template placeholder left behind, and
+   nothing `.gitignore` matches ready to be committed). It compiles
+   nothing; step 7 is the other half.
 7. Test per the Testing section: `cargo test` clean — with the §5
    provider running when the specification has one.
 8. End to end, per the Testing section's last paragraph: a minimal
