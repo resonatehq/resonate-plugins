@@ -16,6 +16,9 @@ export const meta = {
 const ORIGIN = 'https://github.com/resonatehq/resonate-plugins.git'
 const GH = 'resonatehq/resonate-plugins'
 const ROOT = '/tmp/resonate-plugin-factory'
+// The branch the plugin branch is cut from, and whose skills/ the agents read.
+// Defaults to main; pass args.base to run against skill changes not yet merged.
+const BASE = (args && args.base) || 'main'
 
 // ── Pick ────────────────────────────────────────────────────────────────
 phase('Pick')
@@ -135,7 +138,7 @@ phase('Checkout')
 
 await agent(
   `Run: rm -rf ${repo} && git clone ${ORIGIN} ${repo} && ` +
-  `git -C ${repo} checkout -b ${pick.scheme}. ` +
+  `git -C ${repo} checkout ${BASE} && git -C ${repo} checkout -b ${pick.scheme}. ` +
   `Confirm with git -C ${repo} branch --show-current.` +
   (redo
     ? ` Then delete the plugin's existing spec and crate so the next step starts clean: ` +
