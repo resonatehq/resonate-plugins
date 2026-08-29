@@ -137,7 +137,7 @@
 | E-goi | [ ] | [ ] |
 | E2E Test | [ ] | [ ] |
 | Elastic Security | [ ] | [ ] |
-| Elasticsearch | [ ] | [ ] |
+| Elasticsearch | [x] | [x] |
 | Email Trigger (IMAP) | [ ] | [ ] |
 | Emelia | [ ] | [ ] |
 | ERPNext | [ ] | [ ] |
