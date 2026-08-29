@@ -147,13 +147,7 @@ def main(path, pre_review=False):
         if m not in ("request_response", "request_poll"):
             err(f"L-13: Monitoring '{m}' not in the vocabulary")
 
-    # L-17: at least one operation begins work. A plugin whose every
-    # operation is `read` has no unit of work to durably await, which is
-    # the reason a plugin exists (plugin-specify, "Choose the operations").
     invocations = re.findall(r"\| \*\*Invocation\*\* \| `?([a-z_]+)`? \|", text)
-    if invocations and set(invocations) == {"read"}:
-        err("L-17: every operation is `read` — the plugin has no unit of work "
-            "to durably await; §4 must contain at least one Work operation")
 
     # L-18: a boolean the caller supplies must reach the wire as
     # "true"/"false". Python renders True/False, which providers reject.

@@ -1,8 +1,9 @@
 <h1 align="center">Resonate Plugins</h1>
 
 <p align="center">
-  <strong>Await anything.</strong><br>
-  Transport plugins that turn an external system's unit of work into a durable promise.
+  <strong>Every API, as a promise.</strong><br>
+  Transport plugins that put an external system behind a durable promise —
+  callable from every Resonate SDK, whether the work takes forty milliseconds or four weeks.
 </p>
 
 <p align="center">
@@ -13,18 +14,25 @@
 
 ---
 
-A Dag run takes an hour. A render takes four seconds. A support ticket
-closes twenty-eight days after someone opens it. Waiting on any of them
-normally costs you a worker, a webhook receiver, a retry loop, and a
-state machine to remember where you were when the process died.
+You create a promise; the Resonate server calls the provider, sees the
+call through to its terminal state, and settles the promise with the
+outcome — resolved for success, rejected with a code for every failure
+the provider documents as permanent. That is the whole interface. The
+provider becomes reachable from every Resonate SDK, in every language,
+without a client library in any of them.
 
-Resonate already has the primitive for this: the durable promise. These
-plugins put the external system behind it. You create a promise; the
-Resonate server begins the work, sees it through to its terminal state,
-and settles the promise with the outcome — resolved for success,
-rejected with a code for every failure the provider documents as
-permanent. Nothing in your process has to stay alive for it. Nothing has
-to be restarted when it doesn't.
+For a call that answers immediately — run a query, open a ticket, push a
+notification — the win is reach: one integration, written once against
+the live API, available everywhere, with its failure modes already
+classified into settle, retry, and wait-for-an-operator.
+
+For work that takes real time, the promise earns its keep twice over. A
+Dag run takes an hour. A render takes four seconds. A support ticket
+closes twenty-eight days after someone opens it. Waiting on any of those
+normally costs you a worker, a webhook receiver, a retry loop, and a
+state machine to remember where you were when the process died. Here it
+costs a promise: nothing in your process has to stay alive for it, and
+nothing has to be restarted when it doesn't.
 
 ## How it works
 
@@ -64,7 +72,7 @@ No SDK in the loop. No glue service. No webhook endpoint to host.
 
 ## The catalog
 
-| | Plugin | Awaits | |
+| | Plugin | Represents | |
 |---|---|---|---|
 | <img src="assets/airflow.png" alt="" width="28" height="28"> | **Apache Airflow** | a Dag run, from trigger to terminal state | [plugins/airflow](plugins/airflow) |
 | <img src="assets/bannerbear.png" alt="" width="28" height="28"> | **Bannerbear** | an image or video render | [plugins/bannerbear](plugins/bannerbear) |

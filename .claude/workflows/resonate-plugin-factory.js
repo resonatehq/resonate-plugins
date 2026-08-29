@@ -2,7 +2,7 @@ export const meta = {
   name: 'resonate-plugin-factory',
   description: 'Pick the most popular unimplemented plugin that clears the simplicity bar, then specify → review → apply findings → implement (Opus clean-room agents in a throwaway clone)',
   phases: [
-    { title: 'Pick', detail: 'shortlist unchecked plugins that have durable work and clear the simplicity bar, take the most popular' },
+    { title: 'Pick', detail: 'shortlist unchecked plugins that clear the simplicity bar, take the most popular' },
     { title: 'Checkout', detail: 'fresh clone into a temp dir, branch named after the plugin' },
     { title: 'Specify', detail: 'plugin-specify skill, gated on lint --pre-review' },
     { title: 'Review', detail: 'plugin-review skill, re-run after each fix until the verdict holds' },
@@ -26,16 +26,16 @@ const PICK = {
     provider: { type: 'string', description: 'Display name exactly as it appears in Plugins.md' },
     scheme: { type: 'string', description: 'Plugin scheme: lowercase, no separators (the plugins/<scheme>/ folder name)' },
     reason: { type: 'string', description: 'One sentence: why this is the best simple-and-popular candidate' },
-    work: {
+    operations: {
       type: 'string',
       description:
-        'The unit of work, as three named endpoints and a state set: the call that BEGINS it, the call that OBSERVES it to a terminal state, and the terminal states it can end in. Quote the endpoint paths.',
+        'The operations the plugin will expose, each as a quoted endpoint path and method: the provider action(s) a caller would call, and the reads needed to build their arguments. Where an action is long-running, name the separate endpoint that observes it to a terminal state and the states it can end in.',
     },
     simplicity: { type: 'string', description: 'The evidence for the simplicity bar: auth model, operation surface, whether an OpenAPI document and a Docker image exist' },
     popularity: { type: 'string', description: 'The evidence for popularity, with the numbers found: GitHub stars, package downloads, catalogue presence, or market position' },
     runners_up: { type: 'string', description: 'The other shortlisted candidates and why each lost' },
   },
-  required: ['provider', 'scheme', 'reason', 'work', 'simplicity', 'popularity', 'runners_up'],
+  required: ['provider', 'scheme', 'reason', 'operations', 'simplicity', 'popularity', 'runners_up'],
 }
 
 const pick = await agent(
@@ -45,28 +45,28 @@ const pick = await agent(
   `claims of concurrent runs on this machine with \`ls ${ROOT}\`. Note there is no \`gh\` ` +
   `CLI here; use raw.githubusercontent.com and git over HTTPS for everything.\n\n` +
   `Consider only plugins unchecked in BOTH columns, with no branch and no claim. ` +
-  `Among those, choose the one at the INTERSECTION OF DURABLE WORK, SIMPLE, AND POPULAR, ` +
-  `in three steps. The first two are BARS, not rankings; only the third ranks.\n\n` +
+  `Among those, choose the one at the INTERSECTION OF SIMPLE AND POPULAR, in three steps. ` +
+  `Simplicity is a BAR, not a ranking; only popularity ranks. Step 1 is neither — it is the ` +
+  `homework the other two are judged on.\n\n` +
 
-  `Step 1 — DURABLE WORK. A plugin represents an external system's unit of work as a durable ` +
-  `promise, so a provider with no unit of work has nothing for a plugin to represent. To clear ` +
-  `this bar you must name, from the provider's live API documentation: the endpoint that BEGINS ` +
-  `a piece of work, the SEPARATE endpoint that observes it to a terminal state, and the terminal ` +
-  `states it can end in — at least one success and at least one failure. If beginning and ` +
-  `observing are the same synchronous call, there is no work to await and the provider is out, ` +
-  `however popular. A provider whose every useful operation is a read is out. Reporting an ` +
-  `instantaneous CRUD write (create a record, post a message, write an annotation) as "the unit ` +
-  `of work" does not clear this bar: name the endpoint that observes it finishing, or drop the ` +
-  `candidate. The plugin the specification eventually writes must contain this operation, so ` +
-  `name it as precisely as §4 will have to.\n\n` +
+  `Step 1 — NAME THE OPERATIONS. From the provider's live API documentation, name the ` +
+  `operations the plugin will actually expose: the provider action or actions a caller would ` +
+  `call, and the reads needed to build their arguments. Quote each endpoint's method and path. ` +
+  `Duration is not a qualification — a provider whose actions settle in one round trip is ` +
+  `worth a plugin, because the plugin is what makes its API callable as a promise from every ` +
+  `SDK. But where an action IS long-running, name the separate endpoint that observes it to a ` +
+  `terminal state and the states it can end in, because that is what the specification will ` +
+  `have to write. These are the operations the specification is expected to contain, so name ` +
+  `them as precisely as §4 will have to; a candidate you cannot describe at this resolution ` +
+  `has not been researched yet.\n\n` +
 
   `Step 2 — SIMPLICITY. A candidate clears it if it has: a public, well-documented REST API ` +
-  `(published OpenAPI is a strong plus), single-token auth, a small operation surface (the work ` +
-  `from step 1 plus a few reads), and ideally a Docker image so tests can run live. Providers ` +
+  `(published OpenAPI is a strong plus), single-token auth, a small operation surface (the ` +
+  `operations from step 1 and little else), and ideally a Docker image so tests can run live. Providers ` +
   `requiring paid accounts, OAuth dances, or enterprise licenses do not clear the bar. A large ` +
-  `API is not disqualifying when the work of step 1 is a small, well-bounded corner of it — ` +
+  `API is not disqualifying when the operations of step 1 are a small, well-bounded corner of it — ` +
   `judge the surface the plugin will touch, not the provider's total endpoint count. Shortlist ` +
-  `EVERY remaining candidate that clears both bars — expect several, and do not stop at the ` +
+  `EVERY remaining candidate that clears it — expect several, and do not stop at the ` +
   `first one.\n\n` +
 
   `Step 3 — rank the shortlist by POPULARITY and take the most popular. Popularity means how ` +
@@ -76,8 +76,7 @@ const pick = await agent(
   `Look these numbers up rather than relying on memory, and cite the figures you find. Break ` +
   `ties toward the provider a Resonate user is more likely to already run.\n\n` +
 
-  `Neither bar is traded away for popularity. Report the shortlist and why each runner-up lost, ` +
-  `and say for each rejected candidate WHICH bar it missed.\n\n` +
+  `The bar is not traded away for popularity. Report the shortlist and why each runner-up lost.\n\n` +
 
   `Finally, claim your choice so a concurrent run cannot take it: ` +
   `\`mkdir -p ${ROOT} && mkdir ${ROOT}/<scheme>.claim\`. mkdir fails if the directory exists, ` +
@@ -87,7 +86,7 @@ const pick = await agent(
 )
 
 log(`picked ${pick.provider} (${pick.scheme}): ${pick.reason}`)
-log(`work: ${pick.work}`)
+log(`operations: ${pick.operations}`)
 log(`popularity: ${pick.popularity}`)
 log(`runners-up: ${pick.runners_up}`)
 
@@ -114,12 +113,12 @@ await agent(
   `specification for ${pick.provider}. Write the document to ${spec} (create the directories; ` +
   `also create ${repo}/plugins/${pick.scheme}/README.md containing only "# ${pick.provider}"). ` +
   `Docker is available for §5 where the provider is self-hostable. Do not commit or push.\n\n` +
-  `The candidate was selected because of this unit of work, which §4 must contain as a Work ` +
-  `operation:\n${pick.work}\n\n` +
-  `If, once you have the live documentation in front of you, that work turns out not to exist ` +
-  `or not to be observable to a terminal state, STOP and report that — do not substitute a set ` +
-  `of reads and write the document anyway. A plugin whose every operation is \`read\` has ` +
-  `nothing to durably await and must not be written.\n\n` +
+  `The candidate was selected on the strength of these operations, which §4 is expected to ` +
+  `contain:\n${pick.operations}\n\n` +
+  `Follow the skill, not this list, if the live documentation disagrees with it — but say ` +
+  `plainly in your final message where you diverged and why. A specification that quietly ` +
+  `contains a different set of operations than the one the candidate was chosen for means the ` +
+  `choice rested on something that was never checked.\n\n` +
   `Before you finish, \`${lint} --pre-review ${spec}\` must exit 0. It is stricter than the ` +
   `plain invocation on exactly one point: the Reviewed by row must still be empty, because ` +
   `review is a separate step by a separate agent. Do not fill it.\n\n` +
@@ -153,7 +152,7 @@ if (!specGate.clean) {
     stopped_at: 'Specify',
     reason: 'the specification does not pass lint --pre-review',
     lint_output: specGate.output,
-    pick_rationale: { reason: pick.reason, work: pick.work, simplicity: pick.simplicity, popularity: pick.popularity, runners_up: pick.runners_up },
+    pick_rationale: { reason: pick.reason, operations: pick.operations, simplicity: pick.simplicity, popularity: pick.popularity, runners_up: pick.runners_up },
     note: `Nothing was pushed. The clone is ${repo}; the claim is ${ROOT}/${pick.scheme}.claim (remove it to free the plugin).`,
   }
 }
@@ -230,7 +229,7 @@ if (review.verdict === 'reject') {
     reason: `the specification was still rejected after ${round} review round(s)`,
     review_verdict: review.verdict,
     findings_report: review.findings_report,
-    pick_rationale: { reason: pick.reason, work: pick.work, simplicity: pick.simplicity, popularity: pick.popularity, runners_up: pick.runners_up },
+    pick_rationale: { reason: pick.reason, operations: pick.operations, simplicity: pick.simplicity, popularity: pick.popularity, runners_up: pick.runners_up },
     note: `Nothing was pushed. The specification is at ${spec} in clone ${repo}; the claim is ${ROOT}/${pick.scheme}.claim (remove it to free the plugin).`,
   }
 }
@@ -330,7 +329,7 @@ await agent(
 return {
   provider: pick.provider,
   scheme: pick.scheme,
-  pick_rationale: { reason: pick.reason, work: pick.work, simplicity: pick.simplicity, popularity: pick.popularity, runners_up: pick.runners_up },
+  pick_rationale: { reason: pick.reason, operations: pick.operations, simplicity: pick.simplicity, popularity: pick.popularity, runners_up: pick.runners_up },
   review_verdict: review.verdict,
   review_rounds: round,
   findings_report: review.findings_report,

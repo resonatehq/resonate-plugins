@@ -139,11 +139,15 @@ if r.status_code >= 400:
    published; verify the URL resolves. Confirm the current API version.
 2. Choose the operations, in this order and nothing beyond it:
    - **Work** — every provider action a caller would durably wait on.
-     This is the reason the plugin exists; there is at least one. Work is
-     the provider's durable, named unit; an inline variant of the same
-     machinery (an ad-hoc command, a raw script run) is the same work with
-     its definition inlined — exclude it unless the provider has no named
-     unit.
+     Work is the provider's durable, named unit; an inline variant of the
+     same machinery (an ad-hoc command, a raw script run) is the same work
+     with its definition inlined — exclude it unless the provider has no
+     named unit. Duration is not a qualification: a provider whose actions
+     all settle in one round trip is still worth a plugin, because the
+     plugin is what makes the API callable as a promise from every SDK.
+     Where such a provider has no long-running unit, say so in the
+     Idempotency row and specify its actions as `request_response`; do not
+     hunt for something slow to justify the plugin.
    - **Composition** — the reads a caller needs to construct the work's
      args: enumerate the resource (`<resource>.list`) and fetch the one
      resource whose shape constrains the args (`<resource>.get`). Include
