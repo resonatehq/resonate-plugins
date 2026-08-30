@@ -222,14 +222,14 @@ def main(path, pre_review=False):
         err(f"L-22: no Algebra row on any of {len(monitorings)} operations")
     if algebras and len(algebras) != len(monitorings):
         err(f"L-22: {len(algebras)} Algebra rows for {len(monitorings)} operations")
-    for alg, mon, inv in zip(algebras, monitorings, invocations):
-        wants = "request_poll" if "poll" in alg else "request_response"
+    for alg, mon in zip(algebras, monitorings):
+        if alg not in ("call", "call + poll"):
+            err(f"L-22: algebra '{alg}' is not `call` or `call + poll` — how an operation "
+                f"begins is the Invocation rung, not the algebra")
+            continue
+        wants = "request_poll" if alg == "call + poll" else "request_response"
         if mon != wants:
             err(f"L-22: algebra '{alg}' implies Monitoring {wants}, table says {mon}")
-        if alg.startswith("find?") and inv != "fetch_then_create":
-            err(f"L-22: algebra '{alg}' implies Invocation fetch_then_create, table says {inv}")
-        if not alg.startswith("find?") and inv == "fetch_then_create":
-            err(f"L-22: Invocation fetch_then_create implies a leading 'find?', algebra is '{alg}'")
 
     # L-14: Reviewed by (empty at specification time)
     rb = re.search(r"\| \*\*Reviewed by\*\* \|(.*?)\|", text)

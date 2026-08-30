@@ -26,22 +26,18 @@ abandons the moment they need the other half.
 
 ## The algebra
 
-Each operation is written as what its implementation must do:
+Classify every operation by what the provider makes a caller do. Two
+values, and they are the whole vocabulary at this level:
 
-| atom | |
-|---|---|
-| `call` | one request; its answer is the outcome |
-| `poll` | re-read until a terminal state |
-| `find` | look up work an earlier delivery may already have started |
-| `+` | then |
-| `?` | only if needed |
-
-| algebra | Invocation | Monitoring |
+| algebra | | Monitoring |
 |---|---|---|
-| `call` | `read`, `create`, `create_idempotent` | `request_response` |
-| `call + poll` | `create`, `create_idempotent` | `request_poll` |
-| `find? + call` | `fetch_then_create` | `request_response` |
-| `find? + call + poll` | `fetch_then_create` | `request_poll` |
+| `call` | one request; its answer is the outcome | `request_response` |
+| `call + poll` | submit, then re-read until a terminal state | `request_poll` |
+
+How an operation *begins* safely — a plain read, an idempotency key, or a
+look-before-you-create — is a finer question, answered against the
+provider's documentation once the surface is settled. That is the
+specification's Invocation rung, not this.
 
 ## Bannerbear, worked
 

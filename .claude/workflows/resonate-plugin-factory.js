@@ -4,7 +4,7 @@ export const meta = {
   phases: [
     { title: 'Pick', detail: 'shortlist unchecked plugins that clear the simplicity bar, take the most popular' },
     { title: 'Checkout', detail: 'fresh clone into a temp dir, branch named after the plugin' },
-    { title: 'Prepare', detail: 'plugin-prepare skill: motions, resources, the surface to support, the algebra' },
+    { title: 'Prepare', detail: 'plugin-prepare skill: motions, resources, the surface to support, call vs call + poll' },
     { title: 'Specify', detail: 'plugin-specify skill, gated on lint --pre-review' },
     { title: 'Review', detail: 'plugin-review skill, re-run after each fix until the verdict holds' },
     { title: 'Fix', detail: 'apply review findings to the specification' },

@@ -383,7 +383,7 @@ if r.status_code >= 400:
 
 | | |
 |---|---|
-| **Algebra** | `call` \| `call + poll` \| `find? + call` \| `find? + call + poll` |
+| **Algebra** | `call` \| `call + poll` |
 | **Invocation** | `read` \| `create_idempotent` \| `fetch_then_create` \| `create` |
 | **Monitoring** | `request_response` \| `request_poll` |
 
@@ -517,12 +517,13 @@ status enum. Field descriptions state facts about values, not
 instructions.
 
 **.5 Implementation.** The Algebra/Invocation/Monitoring table, then one
-Python function using `requests`, real and parseable. The algebra is the
-operation's shape as `plugin` defines it, carried over from the
-preparation; Invocation and Monitoring are that same shape split along the
-two axes below, so the three rows must agree — `call + poll` is
-`request_poll`, a leading `find?` is `fetch_then_create`. Classify every
-operation on both dimensions; the pair determines the function's shape.
+Python function using `requests`, real and parseable. The algebra is
+carried over from the preparation and is only ever `call` or `call + poll`;
+Monitoring restates it (`call + poll` is `request_poll`) and must agree.
+Invocation is the finer question the preparation deliberately left open —
+how the operation begins safely — and is decided here, against the
+provider's documentation. Classify every operation on both dimensions; the
+pair determines the function's shape.
 
 Invocation — how the operation begins. Take the highest rung the provider
 documents:

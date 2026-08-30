@@ -36,10 +36,13 @@ knowledge.
    (users, permissions, licences, settings, schema management the provider
    expects out of band) and transport mechanics (poll endpoints, token
    exchanges, webhook registration, pagination plumbing).
-6. Give each operation its algebra. `call + poll` wherever the provider
-   splits submit from status — collapsing that split is the point. Add
-   `<resource>.submit` only where the wait is long enough that a caller
-   might not want it and the handle stays good long enough to be redeemed.
+6. Give each operation its algebra — `call` or `call + poll`, nothing
+   finer. `call + poll` wherever the provider splits submit from status,
+   since collapsing that split is the point. How the operation begins
+   safely is the specification's Invocation rung and is not decided here.
+   Add `<resource>.submit` only where the wait is long enough that a
+   caller might not want it and the handle stays good long enough to be
+   redeemed.
 7. Write the document. Where a decision was close, say so in Open questions
    rather than burying it — the specification agent inherits your judgement
    and should know which parts were judgement.
