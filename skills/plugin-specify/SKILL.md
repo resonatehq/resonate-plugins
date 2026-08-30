@@ -5,6 +5,13 @@ description: Write the specification.md for a Resonate transport plugin — the 
 
 # plugin-specify
 
+Read [plugin](../plugin) first — the goal, the approach, the algebra — and
+`plugins/<name>/spec/preparation.md`, which decided this plugin's surface
+and gave each operation its algebra. Where the provider's documentation
+contradicts the preparation, the documentation wins and you say so in your
+final message; where you merely disagree with it, follow it — the surface
+was decided as a design, not guessed here.
+
 Write `plugins/<name>/spec/specification.md` for one provider. The document
 is an implementation instruction for a coding agent. It contains tables,
 request lines, JSON Schemas, and Python — no prose. Every claim must come
@@ -376,6 +383,7 @@ if r.status_code >= 400:
 
 | | |
 |---|---|
+| **Algebra** | `call` \| `call + poll` \| `find? + call` \| `find? + call + poll` |
 | **Invocation** | `read` \| `create_idempotent` \| `fetch_then_create` \| `create` |
 | **Monitoring** | `request_response` \| `request_poll` |
 
@@ -508,9 +516,13 @@ status enum, and error fields; enumerate every terminal state in the
 status enum. Field descriptions state facts about values, not
 instructions.
 
-**.5 Implementation.** The Invocation/Monitoring table, then one Python
-function using `requests`, real and parseable. Classify every operation
-on both dimensions; the pair determines the function's shape.
+**.5 Implementation.** The Algebra/Invocation/Monitoring table, then one
+Python function using `requests`, real and parseable. The algebra is the
+operation's shape as `plugin` defines it, carried over from the
+preparation; Invocation and Monitoring are that same shape split along the
+two axes below, so the three rows must agree — `call + poll` is
+`request_poll`, a leading `find?` is `fetch_then_create`. Classify every
+operation on both dimensions; the pair determines the function's shape.
 
 Invocation — how the operation begins. Take the highest rung the provider
 documents:

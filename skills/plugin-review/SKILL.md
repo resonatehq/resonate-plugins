@@ -58,9 +58,12 @@ every step below; your final message is the findings report.
    Supporting a resource means supporting its lifecycle: half an API is a
    plugin a caller has to abandon the moment they need the other half.
 
-   Write this before reading §4, and do not revise it afterwards. Its
-   whole value is being an independent answer: derived from the provider,
-   not recovered from the document under review. Then read §4 and compare.
+   Write this before reading §4 — and before `spec/preparation.md`, which
+   is the author's plan for the same question and would anchor you to it —
+   and do not revise it afterwards. Its whole value is being an
+   independent answer: derived from the provider, not recovered from the
+   documents under review. Once §0 stands, read both; where the plan and
+   §0 disagree, that disagreement is the finding. Then read §4 and compare.
    Coverage gaps are findings like any other, cited against §0:
 
    - a call a caller plainly needs and cannot make → **significant**. Any

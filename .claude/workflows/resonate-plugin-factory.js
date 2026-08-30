@@ -4,6 +4,7 @@ export const meta = {
   phases: [
     { title: 'Pick', detail: 'shortlist unchecked plugins that clear the simplicity bar, take the most popular' },
     { title: 'Checkout', detail: 'fresh clone into a temp dir, branch named after the plugin' },
+    { title: 'Prepare', detail: 'plugin-prepare skill: motions, resources, the surface to support, the algebra' },
     { title: 'Specify', detail: 'plugin-specify skill, gated on lint --pre-review' },
     { title: 'Review', detail: 'plugin-review skill, re-run after each fix until the verdict holds' },
     { title: 'Fix', detail: 'apply review findings to the specification' },
@@ -130,6 +131,7 @@ log(`runners-up: ${pick.runners_up}`)
 
 const repo = `${ROOT}/${pick.scheme}`
 const spec = `${repo}/plugins/${pick.scheme}/spec/specification.md`
+const prep = `${repo}/plugins/${pick.scheme}/spec/preparation.md`
 const lint = `python3 ${repo}/skills/plugin-specify/lint.py`
 const check = `python3 ${repo}/skills/plugin-implement/check.py`
 
@@ -148,25 +150,48 @@ await agent(
   { effort: 'low', label: `checkout:${pick.scheme}` },
 )
 
+// ── Prepare ─────────────────────────────────────────────────────────────
+// What the plugin exposes and what shape each operation has, decided once
+// and written down, so Specify argues with a document rather than with the
+// blank page — and so the surface is reviewable as a design.
+phase('Prepare')
+
+await agent(
+  `Read ${repo}/skills/plugin/SKILL.md and then ${repo}/skills/plugin-prepare/SKILL.md, ` +
+  `and follow the latter exactly to plan the ${pick.provider} plugin. Write the document to ` +
+  `${prep} (create the directories; also create ` +
+  `${repo}/plugins/${pick.scheme}/README.md containing only "# ${pick.provider}"). ` +
+  `Do not write the specification and do not commit or push.\n\n` +
+  (redo
+    ? `This is a re-specification: the plugin already exists and its previous spec/ and src/ ` +
+      `have been deleted. Plan it from the live documentation as if for the first time.\n\n`
+    : '') +
+  `The candidate was selected on the strength of these operations. Treat it as a starting ` +
+  `sketch, not a conclusion — the whole point of this step is to decide the surface ` +
+  `properly:\n${pick.operations}\n\n` +
+  `Your final message: the file path, the primary resource, the operation list with each ` +
+  `operation's algebra, and anything you left in Open questions.`,
+  { model: 'opus', label: `prepare:${pick.scheme}` },
+)
+
 // ── Specify ─────────────────────────────────────────────────────────────
 phase('Specify')
 
 await agent(
-  `Read ${repo}/skills/plugin-specify/SKILL.md and follow it exactly to create the plugin ` +
-  `specification for ${pick.provider}. Write the document to ${spec} (create the directories; ` +
-  `also create ${repo}/plugins/${pick.scheme}/README.md containing only "# ${pick.provider}"). ` +
+  `Read ${repo}/skills/plugin/SKILL.md and then ${repo}/skills/plugin-specify/SKILL.md, and ` +
+  `follow the latter exactly to create the plugin specification for ${pick.provider}. Write ` +
+  `the document to ${spec}. ` +
   `Docker is available for §5 where the provider is self-hostable. Do not commit or push.\n\n` +
   (redo
     ? `This is a re-specification: the ${pick.provider} plugin already exists and its previous ` +
       `spec/ and src/ have been deleted. Write the document from the live documentation as if ` +
       `for the first time — do not go looking for the old one in git history.\n\n`
     : '') +
-  `The candidate was selected on the strength of these operations, which §4 is expected to ` +
-  `contain:\n${pick.operations}\n\n` +
-  `Follow the skill, not this list, if the live documentation disagrees with it — but say ` +
-  `plainly in your final message where you diverged and why. A specification that quietly ` +
-  `contains a different set of operations than the one the candidate was chosen for means the ` +
-  `choice rested on something that was never checked.\n\n` +
+  `${prep} decided this plugin's surface and gave each operation its algebra; §4 is expected ` +
+  `to contain exactly those operations, with the Algebra row carried across. Where the live ` +
+  `documentation contradicts the preparation, the documentation wins — say so plainly in your ` +
+  `final message. A specification that quietly contains a different set of operations than the ` +
+  `one that was planned means the plan rested on something nobody checked.\n\n` +
   `Before you finish, \`${lint} --pre-review ${spec}\` must exit 0. It is stricter than the ` +
   `plain invocation on exactly one point: the Reviewed by row must still be empty, because ` +
   `review is a separate step by a separate agent. Do not fill it.\n\n` +
