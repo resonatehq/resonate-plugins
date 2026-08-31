@@ -1,38 +1,34 @@
 # assets
 
-One icon per implemented plugin, named after the plugin scheme:
-`assets/<scheme>.png`.
+One icon per catalog entry, named after the provider: `assets/<slug>.png`,
+where the slug is the provider's display name lowercased with every
+non-alphanumeric character removed (`AWS Glue` → `awsglue.png`).
 
 Format: 128×128 PNG, RGBA, transparent background. The mark is trimmed to
 its alpha bounding box and re-centred with 8% padding, so icons of very
 different native aspect ratios carry the same optical weight when the
-catalog renders them side by side at 20px.
-
-Every icon is legible on a light page and on a dark one, so the catalog
-needs a single file per plugin rather than a `-lb`/`-db` pair. Where a
-provider ships only a monochrome silhouette, the fill is the brand colour
-that survives both — Zendesk, whose primary `#03363D` disappears on a
-dark page, is drawn in its secondary green `#78A300`.
-
-Add an icon with `make-icon.py`, which applies the format and reports
-whether the result holds up on both backgrounds:
-
-```sh
-pip install pillow cairosvg
-python3 assets/make-icon.py <scheme> <source.svg|source.png> [#hex]
-```
+catalog renders them at 20px.
 
 ## Sources
 
-| icon | source |
+| count | source |
 |---|---|
-| `airflow.png` | [apache/airflow](https://github.com/apache/airflow) `airflow-core/docs/img/logos/airflow_transparent.png` |
-| `bannerbear.png` | [n8n-io/n8n](https://github.com/n8n-io/n8n) `packages/nodes-base/nodes/Bannerbear/bannerbear.png` |
-| `baserow.png` | [n8n-io/n8n](https://github.com/n8n-io/n8n) `packages/nodes-base/nodes/Baserow/baserow.svg` |
-| `gotify.png` | [gotify/logo](https://github.com/gotify/logo) `gotify-logo.png` |
-| `n8n.png` | [n8n-io/n8n](https://github.com/n8n-io/n8n) `packages/nodes-base/nodes/N8n/n8n.svg` |
-| `rundeck.png` | [simple-icons](https://github.com/simple-icons/simple-icons) `icons/rundeck.svg`, filled `#F73F39` |
-| `zendesk.png` | [simple-icons](https://github.com/simple-icons/simple-icons) `icons/zendesk.svg`, filled `#78A300` |
+| 340 | the provider's own mark, from [n8n](https://github.com/n8n-io/n8n)'s `packages/nodes-base/nodes/**` node icons and [simple-icons](https://github.com/simple-icons/simple-icons) |
+| 104 | a generated monogram — the provider's initials on a colour derived from its name, for providers neither source carries |
+
+A mark that reads on a light page but disappears on a dark one — or the
+reverse — sits on a rounded plate whose colour is the opposite of the
+mark's own luminance. A dark mark gets a light plate and a light mark gets
+a dark one, so the mark stays legible on both while the plate blends into
+whichever background matches it. 91 of the 444 needed this.
+
+`make-icon.py` applies the format to a single new icon and reports whether
+the result holds up on both backgrounds:
+
+```sh
+pip install pillow cairosvg
+python3 assets/make-icon.py <slug> <source.svg|source.png> [#hex]
+```
 
 Each mark is the trademark of its owner and appears here only to identify
 the provider the plugin integrates with.

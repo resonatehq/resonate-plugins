@@ -10,7 +10,7 @@ export const meta = {
     { title: 'Fix', detail: 'apply review findings to the specification' },
     { title: 'Implement', detail: 'plugin-implement skill' },
     { title: 'Verify', detail: 'check.py and cargo test, run by an agent that did not write the code' },
-    { title: 'Finalize', detail: 'record the review, tick Plugins.md, rebase, commit, push the branch' },
+    { title: 'Finalize', detail: 'record the review, tick the README catalog, rebase, commit, push the branch' },
   ],
 }
 
@@ -27,7 +27,7 @@ phase('Pick')
 const PICK = {
   type: 'object',
   properties: {
-    provider: { type: 'string', description: 'Display name exactly as it appears in Plugins.md' },
+    provider: { type: 'string', description: 'Display name exactly as it appears in the README catalog' },
     scheme: { type: 'string', description: 'Plugin scheme: lowercase, no separators (the plugins/<scheme>/ folder name)' },
     reason: { type: 'string', description: 'One sentence: why this is the best simple-and-popular candidate' },
     operations: {
@@ -75,8 +75,8 @@ const pick = redo
     )
   : await agent(
 
-  `Fetch https://raw.githubusercontent.com/${GH}/main/Plugins.md (a table: ` +
-  `Plugin | Spec | Impl with [x]/[ ] cells). List the open plugin branches with ` +
+  `Fetch https://raw.githubusercontent.com/${GH}/main/README.md — the catalog, a table of ` +
+  `icon | Plugin | Spec | Impl with [x]/[ ] cells. List the open plugin branches with ` +
   `\`git ls-remote --heads ${ORIGIN}\` — a plugin with an open branch is taken — and the ` +
   `claims of concurrent runs on this machine with \`ls ${ROOT}\`. Note there is no \`gh\` ` +
   `CLI here; use raw.githubusercontent.com and git over HTTPS for everything.\n\n` +
@@ -145,7 +145,7 @@ await agent(
   (redo
     ? ` Then delete the plugin's existing spec and crate so the next step starts clean: ` +
       `rm -rf ${repo}/plugins/${pick.scheme}/spec ${repo}/plugins/${pick.scheme}/src. ` +
-      `Leave plugins/${pick.scheme}/README.md and the Plugins.md row alone.`
+      `Leave plugins/${pick.scheme}/README.md and the catalog row in README.md alone.`
     : ''),
   { effort: 'low', label: `checkout:${pick.scheme}` },
 )
@@ -408,11 +408,11 @@ await agent(
   `   It is the only durable record that these findings were raised and answered; without it ` +
   `   the Reviewed by row asserts a review nobody can read.\n` +
   `2. Bring the branch up to date: git fetch origin main && git merge origin/main. Resolve ` +
-  `   conflicts if any — Plugins.md is edited by every run, so expect one there.\n` +
-  `3. Edit Plugins.md — find the row for "${pick.provider}" and ${tick}` +
+  `   conflicts if any — README.md carries the catalog and every run edits it, so expect one there.\n` +
+  `3. Edit README.md — find the catalog row for "${pick.provider}" and ${tick}` +
   (redo ? ' (the row is already ticked; leave it ticked, or untick Impl if verification failed)' : '') + `.\n` +
   `4. git add -A. Then run \`git status --porcelain\` and confirm every staged path is a file ` +
-  `   this plugin owns: plugins/${pick.scheme}/** and Plugins.md, nothing else. Nothing ` +
+  `   this plugin owns: plugins/${pick.scheme}/**, README.md and assets/, nothing else. Nothing ` +
   `   .gitignore matches may be committed — never force-add. Unstage anything else.\n` +
   `5. Commit with message "${pick.scheme}: ${redo ? 're-specification + implementation' : 'specification + implementation'} (plugin factory)" ` +
   `   ending with the trailer "Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>", and ` +
