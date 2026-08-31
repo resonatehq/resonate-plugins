@@ -11,6 +11,11 @@ A plugin exposes a provider's API as durable promises, so that any Resonate
 SDK can call it as if it were a locally defined function. One integration,
 every language, no client library.
 
+Literally as if local: where a caller writes `ctx.rpc(fn, args)` for a
+function in their own codebase, a plugin's binding exports a descriptor
+carrying the func name and the address, so the call site reads
+`ctx.rpc(bannerbear.image.create, args)` — same three tokens, same await.
+
 Where an action runs long, the promise carries await semantics on top for
 free. That is the icing. It is not the qualification.
 
@@ -64,3 +69,5 @@ without its waiting counterpart.
 | [plugin-specify](../plugin-specify) | the specification → `spec/specification.md` |
 | [plugin-review](../plugin-review) | §0 API Surface derived independently, then findings against the specification |
 | [plugin-implement](../plugin-implement) | the Rust crate → `src/` |
+| [plugin-bind](../plugin-bind) | a typed descriptor per operation, per SDK → `sdk/<language>/` |
+| [plugin-readme](../plugin-readme) | what the provider is, one example per SDK, the config → `README.md` |

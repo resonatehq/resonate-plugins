@@ -10,6 +10,8 @@ export const meta = {
     { title: 'Fix', detail: 'apply review findings to the specification' },
     { title: 'Implement', detail: 'plugin-implement skill' },
     { title: 'Verify', detail: 'check.py and cargo test, run by an agent that did not write the code' },
+    { title: 'Bind', detail: 'plugin-bind skill: a typed descriptor per operation, per SDK' },
+    { title: 'Document', detail: 'plugin-readme skill: what the provider is, one example per SDK, the config' },
     { title: 'Finalize', detail: 'record the review, tick the README catalog, rebase, commit, push the branch' },
   ],
 }
@@ -392,6 +394,41 @@ log(`verify: check.py ${verify.check_clean ? 'clean' : 'FAILED'}, cargo test ${v
 if (verify.tests_passed !== impl.tests_passed) {
   log(`implementer reported tests_passed=${impl.tests_passed}; independent run says ${verify.tests_passed}`)
 }
+
+// ── Bind ────────────────────────────────────────────────────────────────
+// The crate makes the operations reachable; the bindings make them callable
+// the way a local function is. Both are downstream of the specification, so
+// neither waits on the other.
+phase('Bind')
+
+await agent(
+  `Read ${repo}/skills/plugin/SKILL.md and then ${repo}/skills/plugin-bind/SKILL.md, and ` +
+  `follow the latter exactly to write the SDK bindings for the ${pick.provider} plugin from ` +
+  `${spec}, into ${repo}/plugins/${pick.scheme}/sdk/<language>/.\n\n` +
+  `The SDKs are resonatehq/resonate-sdk-ts, resonate-sdk-py, resonate-sdk-go and ` +
+  `resonate-sdk-java, all on GitHub and readable through raw.githubusercontent.com. Read each ` +
+  `one's README and its Context source for the real call shape before writing anything for it; ` +
+  `${repo}/skills/plugin-bind/reference/typescript/binding.ts is the worked example and is ` +
+  `TypeScript's shape, not everyone's.\n\n` +
+  `Do not commit or push. Your final message: what you wrote per SDK, and — required — which ` +
+  `SDKs still lack the rpc overload the descriptor form needs, so the bindings are inert there.`,
+  { model: 'opus', label: `bind:${pick.scheme}` },
+)
+
+// ── Document ────────────────────────────────────────────────────────────
+phase('Document')
+
+await agent(
+  `Read ${repo}/skills/plugin/SKILL.md and then ${repo}/skills/plugin-readme/SKILL.md, and ` +
+  `follow the latter exactly to write ${repo}/plugins/${pick.scheme}/README.md, replacing the ` +
+  `placeholder that is there. Draw on ${spec}, ${prep} — whose Motions table is where the ` +
+  `representative example comes from — and the bindings in ` +
+  `${repo}/plugins/${pick.scheme}/sdk/.\n\n` +
+  `Every example must use operations §4 actually declares, with arguments §4.N.1 actually ` +
+  `carries. Where an SDK has no binding, say so in its place rather than dropping the ` +
+  `language. Do not commit or push.`,
+  { model: 'opus', label: `document:${pick.scheme}` },
+)
 
 // ── Finalize ────────────────────────────────────────────────────────────
 phase('Finalize')
