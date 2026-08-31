@@ -19,4 +19,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
 [dev-dependencies]
 # The in-process Resonate server the end-to-end test compiles the worker into.
 resonate = { git = "https://github.com/resonatehq/resonate", branch = "core-crate" }
+# The engine the in-process server is constructed over: `resonate::server::Server::new`
+# takes it, and the `resonate` crate does not re-export the type. Same source.
+resonate-server-dbms = { git = "https://github.com/resonatehq/resonate", branch = "core-crate", default-features = false, features = ["sqlite"] }
 tokio = { version = "1", features = ["rt-multi-thread", "time", "macros", "sync"] }
